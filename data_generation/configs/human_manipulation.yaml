@@ -1,0 +1,8 @@
+# Ego-/third-person human manipulation video.
+# The object is grounded by the action that moves it ("...gripped by the hand").
+corpus: human_manipulation
+agent: hand
+point_prompt_template: "point to {obj} gripped and picked up by the {agent}"
+recaption: true              # recaption when the source caption is coarse/vague
+fps: 15
+clip_threshold: 0.02

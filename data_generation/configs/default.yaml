@@ -1,0 +1,40 @@
+# Default pipeline hyperparameters. Corpus presets (human_manipulation.yaml,
+# robot.yaml, in_the_wild.yaml) override only the fields that differ.
+# Every value here matches the paper / appendix defaults.
+
+corpus: molmomotion          # tag used for output sub-directory naming
+
+# ── Stage 1: grounding ────────────────────────────────────────────────────────
+kmeans_k: 100                # N query points sampled per object (paper: 100)
+max_frames: 0                # 0 = use all frames
+agent: hand                  # filled into the pointing prompt: "...by the {agent}"
+point_prompt_template: "point to {obj} gripped and picked up by the {agent}"
+recaption: true              # run Molmo2-8B visual recaption when phrase is vague/absent
+save_masks: false
+save_debug: false
+
+# ── Stage 2/3: video + 2D tracking ────────────────────────────────────────────
+fps: 15                      # pipeline frame rate (tracks computed at this rate)
+encode_480p: true            # re-encode source to 854x480 before ViPE + AllTracker
+alltracker_max_side: 512
+max_frame_groups: 5          # skip videos whose grounding yields >5 detection frames
+
+# ── Stage 5: filter + smooth (App. A.6) ───────────────────────────────────────
+smooth_steps: 100
+smooth_lr: 0.05
+alpha: 1000.0                # L_pin weight
+lambda_reg: 1.0e-4
+z_thresh: 1.0                # z-score track-drop threshold
+n_anchors: 16               # K anchor tracks
+gating_power: 2             # p in trust weight w = exp(-e/s)^p
+min_cluster_size: 10        # mean-shift spatial auto-split min size
+depth_step: 1
+
+# ── Stage 6: video-level clipping (§4.1) ──────────────────────────────────────
+clip_threshold: 0.02         # tau, metres/frame
+clip_min_gap: 5              # merge runs separated by < this many frames
+clip_min_clip_sec: 0.5       # min-clip floor = max(3, round(0.5 * fps))
+clip_min_frames: null        # override the floor (e.g. 24 for sim corpora)
+
+# ── tooling ───────────────────────────────────────────────────────────────────
+vipe_cmd: vipe               # ViPE console script (installed from third_party/vipe)

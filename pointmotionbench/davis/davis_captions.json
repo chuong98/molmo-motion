@@ -1,0 +1,272 @@
+{
+  "bear": {
+    "description": "a brown bear walks to the left"
+  },
+  "bike-packing": {
+    "description": "a person rotates the bike and inspects it carefully"
+  },
+  "blackswan": {
+    "description": "a black swan swims to the right"
+  },
+  "bmx-bumps": {
+    "description": "a bike rider rides a bmx bike on a dirt track"
+  },
+  "bmx-trees": {
+    "description": "a bike rider rides the bike along the road"
+  },
+  "boat": {
+    "description": "a boat sails to the left along the river"
+  },
+  "boxing-fisheye": {
+    "description": "two boxers compete in a boxing game with a referee on the side"
+  },
+  "breakdance": {
+    "description": "a dancer performs breakdancing in front of a crowd"
+  },
+  "breakdance-flare": {
+    "description": "a breakdancer performs flares"
+  },
+  "bus": {
+    "description": "a bus goes to the right along the road"
+  },
+  "camel": {
+    "description": "a camel walks to the right and then walks back"
+  },
+  "car-roundabout": {
+    "description": "a dark gray car drives through a roundabout"
+  },
+  "car-shadow": {
+    "description": "a silver car drive to the left"
+  },
+  "car-turn": {
+    "description": "a silver car follows the road and slowly turns to the right"
+  },
+  "cat-girl": {
+    "description": "a girl holds a cat and smiles"
+  },
+  "classic-car": {
+    "description": "a classic car drives to the left"
+  },
+  "color-run": {
+    "description": "a person sprays color in a running race"
+  },
+  "cows": {
+    "description": "a cow walks slowly forward"
+  },
+  "crossing": {
+    "description": "two persons crosses the road while a car drives in the opposite direction in the back"
+  },
+  "dance-jump": {
+    "description": "the dancer jumps"
+  },
+  "dance-twirl": {
+    "description": "the dancer performs a twirl."
+  },
+  "dancing": {
+    "description": "three persons dance in front of the crowd"
+  },
+  "disc-jockey": {
+    "description": "two persons extend their arms"
+  },
+  "dog": {
+    "description": "a dog walks on the yellow grass"
+  },
+  "dog-agility": {
+    "description": "the dog jumps and weaves between poles"
+  },
+  "dog-gooses": {
+    "description": "the dog chases the 4 geese"
+  },
+  "dogs-jump": {
+    "description": "two dogs jump for treat around a person"
+  },
+  "dogs-scale": {
+    "description": "put a dog on the weight"
+  },
+  "drift-chicane": {
+    "description": "a racing car drifts through the chicane"
+  },
+  "drift-straight": {
+    "description": "a racing car drifts on a straight track"
+  },
+  "drift-turn": {
+    "description": "a racing car drifts around a turn"
+  },
+  "drone": {
+    "description": "the drone falls to the ground. then one person picks it up"
+  },
+  "elephant": {
+    "description": "an elephant slowly walks"
+  },
+  "flamingo": {
+    "description": "a flamingo dips its beak into the water while walking to the right"
+  },
+  "goat": {
+    "description": "a goat walks along the cliff"
+  },
+  "gold-fish": {
+    "description": "several fishes swims in the water"
+  },
+  "hike": {
+    "description": "a person is hiking and walks to the right"
+  },
+  "hockey": {
+    "description": "a hockey player prepares and shoots"
+  },
+  "horsejump-high": {
+    "description": "a rider on a horse jumps over a high obstacle"
+  },
+  "horsejump-low": {
+    "description": "a rider on a horse jumps over a low obstacle"
+  },
+  "india": {
+    "description": "women with Indian costume walk on the street"
+  },
+  "judo": {
+    "description": "a judo master flips another practitioner over"
+  },
+  "kid-football": {
+    "description": "a kid kicks soccer"
+  },
+  "kite-surf": {
+    "description": "a kite surfer surfs to the right"
+  },
+  "kite-walk": {
+    "description": "the surfer backs up"
+  },
+  "koala": {
+    "description": "a koala moves onto a branch and holds onto it"
+  },
+  "lab-coat": {
+    "description": "three women students in lab coat standing looks at the camera"
+  },
+  "lady-running": {
+    "description": "an old lady runs forward holding a note"
+  },
+  "libby": {
+    "description": "a dog walks to the right on grass"
+  },
+  "lindy-hop": {
+    "description": "several groups of dancers dance in the ball room"
+  },
+  "loading": {
+    "description": "a man moves a tv box to the cart"
+  },
+  "longboard": {
+    "description": "a man rides a skateboard and waves while a cyclist approaches from the opposite direction"
+  },
+  "lucia": {
+    "description": "a lady walks to the right"
+  },
+  "mallard-fly": {
+    "description": "a mallard starts to fly"
+  },
+  "mallard-water": {
+    "description": "a mallard swims in the water"
+  },
+  "mbike-trick": {
+    "description": "a motorbike rider performs a burnout, spinning the tire and producing smoke"
+  },
+  "miami-surf": {
+    "description": "several surfers surf in the ocean"
+  },
+  "motocross-bumps": {
+    "description": "a motorbike rider on a motorbike jumps through the bumps"
+  },
+  "motocross-jump": {
+    "description": "a motorbike rider on a motorbike jumps through the bumps"
+  },
+  "motorbike": {
+    "description": "a motorbike with two passengers drives to the right"
+  },
+  "night-race": {
+    "description": "two racing cars race against each other"
+  },
+  "paragliding": {
+    "description": "a paraglider flys"
+  },
+  "paragliding-launch": {
+    "description": "a paraglider runs forward and launch the paragliding"
+  },
+  "parkour": {
+    "description": "a person is doing parkour"
+  },
+  "pigs": {
+    "description": "little pigs walks to the big pig"
+  },
+  "planes-water": {
+    "description": "airplane slowly moves forward"
+  },
+  "rallye": {
+    "description": "a rally car drives forward"
+  },
+  "rhino": {
+    "description": "a rhino walks to the left"
+  },
+  "rollerblade": {
+    "description": "a rollerblader rumps"
+  },
+  "schoolgirls": {
+    "description": "a girl moves to the right while others stand"
+  },
+  "scooter-black": {
+    "description": "a rider rides the scooter to the left"
+  },
+  "scooter-board": {
+    "description": "a person sits on a cart and drives it"
+  },
+  "scooter-gray": {
+    "description": "a rider rides the scooter to the left"
+  },
+  "sheep": {
+    "description": "several sheeps walk"
+  },
+  "shooting": {
+    "description": "a soldier slides down the rope while shooting"
+  },
+  "skate-park": {
+    "description": "a skater skates in a skate park"
+  },
+  "snowboard": {
+    "description": "a snowboarder does a flip"
+  },
+  "soapbox": {
+    "description": "two drivers drive a self-made cart through a bump"
+  },
+  "soccerball": {
+    "description": "a soccer rolls from right to left"
+  },
+  "stroller": {
+    "description": "a person moves the stroller to the right"
+  },
+  "stunt": {
+    "description": "a person slides down the skate park on a scooter"
+  },
+  "surf": {
+    "description": "a person surfs to the right"
+  },
+  "swing": {
+    "description": "a lady swings on a swing"
+  },
+  "tennis": {
+    "description": "a tennis player does a forehand hit"
+  },
+  "tractor-sand": {
+    "description": "a tractor drives around an obstacle on sand"
+  },
+  "train": {
+    "description": "a toy train turns left along the track"
+  },
+  "tuk-tuk": {
+    "description": "three persons sit on a car"
+  },
+  "upside-down": {
+    "description": "two persons ride on a rollercoaster"
+  },
+  "varanus-cage": {
+    "description": "a varanus crawls on the branch"
+  },
+  "walking": {
+    "description": "two persons walk down the street"
+  }
+}

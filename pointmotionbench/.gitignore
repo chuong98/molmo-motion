@@ -1,0 +1,21 @@
+# Large binary data — hosted on HuggingFace, not GitHub
+davis/tracks/
+davis/videos/
+hot3d/tracks/
+hot3d/videos/
+worldtrack/worldtrack_index_map.json
+worldtrack/adt_mini/
+worldtrack/ds_mini/
+worldtrack/po_mini/
+worldtrack/pstudio_mini/
+
+# Python artifacts
+__pycache__/
+*.pyc
+*.pyo
+.eggs/
+*.egg-info/
+
+# Misc
+.DS_Store
+*.tmp

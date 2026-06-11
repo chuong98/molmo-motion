@@ -1,0 +1,99 @@
+# MolmoBot pick-and-place finetuning recipe.
+#
+# Canonical hyperparameters used to finetune a MolmoBot policy on the
+# MolmoSpaces 2-camera pick-and-place data from a MolmoMotion pretrained
+# checkpoint. The companion `launch_scripts/train.sh` reads this file as
+# its source of truth — edit values here, not inline in the shell.
+
+# ----- Initialization & save -----------------------------------------------
+# Path to the unsharded MolmoMotion checkpoint produced by
+# `scripts/unshard_pretrained.py`. Must contain `model.pt` + `config.yaml`.
+init_ckpt: /path/to/molmo-motion-unsharded
+
+# Where the trainer writes per-step checkpoints and the run config.
+save_folder: /path/to/train_runs/molmobot_pickplace_p8_h3
+# Where the per-run state/action normalization statistics are written.
+stats_path: /path/to/train_stats/molmobot_pickplace_p8_h3.json
+
+# ----- Training data -------------------------------------------------------
+# Directories produced by `scripts/prepare_training_data.py`. The relative
+# sampling rates determine how often each task is drawn (must sum to 1).
+data_paths:
+  - /path/to/train_view/pick_place_2cam_randomized
+  - /path/to/train_view/pick_place_color_2cam_randomized
+dataset_sample_rates: [0.5, 0.5]
+
+# ----- Recipe --------------------------------------------------------------
+# Prompt-encoder mode: the LM acts as a feature extractor only; the
+# ActionExpert flow-matching MSE is the sole training loss. Set false to
+# also train the LM autoregressively on a future-track answer span (the
+# "joint" recipe described in the paper).
+prompt_encoder_mode: true
+
+# Trajectory-prediction prompt wrapper. ``default`` matches the
+# pretraining prompt format used in MolmoMotion's `all7` recipe.
+prompt_style: default
+
+# Future-trajectory shape — must match the init checkpoint's pretraining
+# config. The released MolmoMotion-H3 checkpoints are P=8, H=3, F=8.
+num_points: 8           # P — query points per object
+history_size: 3         # H — history frames (must match init ckpt's `_h<N>_`)
+num_future_frames: 8    # F — future frames (must match init ckpt's `_f<N>_`)
+history_stride: 2       # frame stride at 15 fps (history)
+future_stride: 2        # frame stride at 15 fps (future)
+
+# Sample only data-gen episodes in these phases (5-8 = grasp + place).
+sample_phases: [5, 6, 7, 8]
+
+# Observation window passed to the ActionExpert: 3 frames at sim-step
+# deltas -4, -2, 0 relative to t.
+n_obs_steps: 3
+obs_step_delta: 2
+
+# ----- Action head ---------------------------------------------------------
+# 7 arm joints + 1 gripper, absolute joint-position commands.
+action_preset: franka_joint
+# Camera names in order (must match the data prep camera list).
+camera_preset: franka_droid_exo_then_wrist
+
+# Number of noise levels sampled per batch for the flow-matching MSE loss.
+num_flow_timestamps: 8
+
+# ----- Optimizer / schedule ------------------------------------------------
+# `seq_len` is the maximum LM context. Bump to 2560 for the joint recipe
+# (longer answer span carrying the future tracks).
+seq_len: 2048
+max_duration: 100000           # total optimizer steps
+device_batch_size: 2
+global_batch_size: 128         # = device_batch_size × n_gpus, no grad accum on 8 GPUs
+log_interval: 20
+val_interval: 1000
+val_max_examples: 2000
+save_interval: 5000
+save_num_checkpoints_to_keep: -1
+
+# Finetune the LM attention + MLP (`ft_llm=true`), but keep the LM token
+# embeddings frozen (`ft_embedding=ae` = ActionExpert-embedding-only).
+# Vision tower + connector are frozen.
+ft_llm: true
+ft_embedding: ae
+
+# Image augmentation; furthest-camera dropout left off so we always use
+# the trained `[exo, wrist]` camera order.
+img_aug: true
+furthest_camera_prob: 0.0
+
+# Model-config overrides. `crop_mode=resize` matches the SigLIP recipe;
+# `max_images=6` is the max sample-time image count.
+model_overrides:
+  mm_preprocessor:
+    image:
+      crop_mode: resize
+      max_images: 6
+
+# Disable torch-Inductor's compiled-loss fusion if you observe NaN loss
+# within the first few steps. Adds ~5% wallclock; rock-solid stability.
+compile_loss: false
+
+# Weighted per-step sampling in the data loader (grasp-aware).
+weighted_sampling: true

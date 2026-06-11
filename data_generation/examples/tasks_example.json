@@ -1,0 +1,12 @@
+[
+  {
+    "video_id": "pour_water_0001",
+    "video_path": "/abs/path/to/pour_water_0001.mp4",
+    "action": "pour water from the tan flask into the red can"
+  },
+  {
+    "video_id": "put_yellow_toy_0002",
+    "video_path": "/abs/path/to/put_yellow_toy_0002.mp4",
+    "action": "put yellow toy in blue bowl"
+  }
+]

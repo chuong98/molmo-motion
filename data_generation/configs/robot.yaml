@@ -1,0 +1,7 @@
+# Real-robot manipulation video. Object grounded by the robot gripper.
+corpus: robot
+agent: robot gripper
+point_prompt_template: "point to {obj} gripped and picked up by the {agent}"
+recaption: true              # recaption only when the instruction is vague
+fps: 15
+clip_threshold: 0.02

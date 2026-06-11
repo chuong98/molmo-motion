@@ -1,0 +1,21 @@
+{
+  "source": "molmo-motion-1m molmospaces",
+  "video_id": "pick_place_2cam_randomized__house_0__00000000__exo_camera_1",
+  "object": "body_33",
+  "t0_frame_index": 71,
+  "history_frames": [
+    69,
+    70,
+    71
+  ],
+  "future_frames": [
+    72,
+    101
+  ],
+  "action": "Pick up the salt shaker and place it in or on the rustic stone bowl with bird spout",
+  "fps": 15,
+  "image_hw": [
+    352,
+    624
+  ]
+}

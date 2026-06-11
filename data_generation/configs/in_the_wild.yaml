@@ -1,0 +1,8 @@
+# In-the-wild internet video (third-person).
+# No "hand/gripper" agent — the object is grounded directly in tracking mode.
+corpus: in_the_wild
+agent: ""
+point_prompt_template: "track the {obj}"
+recaption: true              # caption from the video when none is provided
+fps: 8                       # low-fps default; raise for higher-fps sources
+clip_threshold: 0.02
