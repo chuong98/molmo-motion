@@ -93,7 +93,12 @@ Training and evaluation read two separate corpora from HuggingFace:
 | `MOLMO_MOTION_1M_ROOT` | Training | [`allenai/molmo-motion-1m`](https://huggingface.co/datasets/allenai/molmo-motion-1m) |
 | `POINTMOTIONBENCH_ROOT` | Evaluation | [`allenai/PointMotionBench`](https://huggingface.co/datasets/allenai/PointMotionBench) |
 
-Export both before running anything in this README:
+Export both before running anything in this README. The two roots must
+point at **new directories outside this repo** — they will be populated
+by `huggingface-cli download` below. Do not point them at
+[`dataset_recipes/`](dataset_recipes/) or
+[`pointmotionbench/`](pointmotionbench/), which only hold recipes and
+documentation.
 
 ```bash
 export MOLMO_MOTION_1M_ROOT=/your/path/to/molmo-motion-1m
@@ -159,6 +164,46 @@ huggingface-cli download allenai/MolmoMotion-4B-H3-F30 \
 
 Pick H=3 / F=30 for typical video use (3 history frames, predict 2 seconds at
 15 fps). Pick H=1 / F=32 when only a single query keyframe is available.
+
+### Backbone init for training from scratch
+
+Stage-1 training (see [Training](#training)) starts from the
+**`Molmo2-4B-Pretrain`** checkpoint — the pretrain stage of
+[Molmo2](https://github.com/allenai/molmo2), released by Ai2
+alongside the Molmo2 codebase. The other two Molmo2-4B distributions
+(`Molmo2-4B-SFT.tar` and `Molmo2-4B.tar`, the long-context-SFT variant)
+contain extra config fields the trajectory trainer does not recognize
+(e.g. `use_image_augmentation`) and **cannot** be substituted.
+
+Download URL is published in the Molmo2 README's
+[Checkpoints table](https://github.com/allenai/molmo2#checkpoints):
+
+```bash
+wget https://storage.googleapis.com/oe-training-public/Molmo2-1225/Molmo2-4B-Pretrain.tar
+tar -xvf Molmo2-4B-Pretrain.tar
+# The extracted folder is what `/path/to/Molmo2-4B-Pretrain` refers to in Stage 1.
+```
+
+`oe-training-public` is an unauthenticated GCS bucket, so the `wget`
+above works without any `gcloud` credentials.
+
+After extraction the folder contains an OLMo-native **sharded `distcp`**
+checkpoint:
+
+```
+Molmo2-4B-Pretrain/
+├── config.yaml
+└── step32000/
+    ├── config.yaml
+    ├── model_and_optim/__0_*.distcp
+    └── train/
+```
+
+Pass the top-level `Molmo2-4B-Pretrain/` path to
+`launch_scripts/sft.py` as-is — the trainer reads the sharded format
+directly via FSDP2. Do **not** run the
+`convert_to_unsharded.py` step from the MolmoBot README; that step is
+for downstream HF inference and is not needed (or supported) here.
 
 # Quick Start
 
@@ -238,7 +283,7 @@ recipes live in three places; each per-dataset `README.md` is
 
 | Where | What it provides |
 |---|---|
-| [`allenai/molmo-motion-1m`](https://huggingface.co/datasets/allenai/molmo-motion-1m) (HF) | Per-dataset reconstruction for `MOLMO_MOTION_1M_ROOT` — each `<dataset>/` ships its `README.md` + `reconstruct_*.py` alongside the annotations (EgoDex, YT-VIS, HD-EPIC, Xperience, Stereo4D, DROID, MolmoSpaces). See [`dataset_construction/`](dataset_construction/) for the pointer. |
+| [`allenai/molmo-motion-1m`](https://huggingface.co/datasets/allenai/molmo-motion-1m) (HF) | Per-dataset reconstruction for `MOLMO_MOTION_1M_ROOT` — each `<dataset>/` ships its `README.md` + `reconstruct_*.py` alongside the annotations (EgoDex, YT-VIS, HD-EPIC, Xperience, Stereo4D, DROID, MolmoSpaces). See [`dataset_recipes/`](dataset_recipes/) for the pointer. |
 | [`pointmotionbench/`](pointmotionbench/) | Per-subset reconstruction for `POINTMOTIONBENCH_ROOT` (DAVIS / HOT3D / WorldTrack) |
 | [`data_generation/`](data_generation/) | The pipeline code that annotates new raw videos with the same 3D track annotation schema |
 
@@ -263,6 +308,13 @@ $POINTMOTIONBENCH_ROOT/
 
 Training reads from `$MOLMO_MOTION_1M_ROOT`; eval reads from
 `$POINTMOTIONBENCH_ROOT`. No glue beyond setting the env vars.
+
+> **Stereo4D heads-up.** The HuggingFace download ships only a `track_index/`
+> for Stereo4D; `tracks/` and `camera/` are both rebuilt locally. Run
+> `$MOLMO_MOTION_1M_ROOT/stereo4d/reconstruct_tracks.py` (per
+> `stereo4d/README.md`) before `scripts/build_track_keys_cache.py`,
+> otherwise the cache builder reports all 23,011 Stereo4D entries as
+> missing NPZs.
 
 # Training
 

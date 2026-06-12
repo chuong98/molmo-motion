@@ -28,8 +28,8 @@ AUDIT.md
 API_SURFACE.md
 
 # Dataset payloads — hosted on HF (allenai/molmo-motion-1m), not GitHub
-dataset_construction/*
-!dataset_construction/README.md
+dataset_recipes/*
+!dataset_recipes/README.md
 
 # Misc
 .DS_Store
