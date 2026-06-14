@@ -26,7 +26,7 @@ classifiers = [
 dependencies = [
     "torch>=2.5",
     "torchvision",
-    "transformers>=4.45",
+    "transformers>=4.45,<5",
     "huggingface_hub>=0.24",
     "numpy>=1.26",
     "pillow>=10",

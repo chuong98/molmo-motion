@@ -136,6 +136,12 @@ def main():
         if cp.exists() and not args.force:
             print(f"[skip] {ds}: cache exists at {cp} (use --force to rebuild)")
             continue
+        split_file = DATASETS[ds][0]
+        if not (root / split_file).exists():
+            print(f"[skip] {ds}: split file not found at {root / split_file} "
+                  f"— dataset not downloaded under MOLMO_MOTION_1M_ROOT={root}. "
+                  f"Pass --datasets to limit to the datasets you downloaded.")
+            continue
         print(f"[build] {ds} → {cp}")
         total, missing = build_cache_for_dataset(ds, root, cp, args.workers)
         print(f"  {ds}: {total} entries, {missing} missing/corrupted NPZs")

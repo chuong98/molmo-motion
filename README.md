@@ -76,6 +76,21 @@ conda activate molmo-motion
 pip install -e .[viz]
 ```
 
+> **GPU / driver note.** `pip install` pulls the default PyTorch wheels,
+> which target the newest CUDA runtime and may not match an older driver
+> (`torch.cuda.is_available()` then returns `False`). If so, install a torch
+> build matching your driver from the PyTorch index, e.g. for a CUDA 12.8
+> driver:
+> ```bash
+> pip install "torch==2.9.1" torchvision "torchcodec==0.9.*" \
+>     --index-url https://download.pytorch.org/whl/cu128
+> ```
+> `torchcodec` must match the torch minor version (0.9.x ↔ torch 2.9). The
+> video decoder also needs FFmpeg shared libraries on the system
+> (`conda install -c conda-forge ffmpeg`); the bundled training/eval recipes
+> decode with OpenCV and do not require it, but the `torchcodec_exact` path
+> does.
+
 Installation registers three console scripts:
 
 | Command | Purpose |
@@ -95,7 +110,7 @@ Training and evaluation read two separate corpora from HuggingFace:
 
 Export both before running anything in this README. The two roots must
 point at **new directories outside this repo** — they will be populated
-by `huggingface-cli download` below. Do not point them at
+by `hf download` below. Do not point them at
 [`dataset_recipes/`](dataset_recipes/) or
 [`pointmotionbench/`](pointmotionbench/), which only hold recipes and
 documentation.
@@ -109,11 +124,11 @@ Download:
 
 ```bash
 # Training corpus.
-huggingface-cli download allenai/molmo-motion-1m \
+hf download allenai/molmo-motion-1m \
     --repo-type dataset --local-dir $MOLMO_MOTION_1M_ROOT
 
 # Evaluation benchmark — only needed for `launch_scripts/eval_pointmotionbench.py`.
-huggingface-cli download allenai/PointMotionBench \
+hf download allenai/PointMotionBench \
     --repo-type dataset --local-dir $POINTMOTIONBENCH_ROOT
 ```
 
@@ -158,7 +173,7 @@ MolmoMotion.
 | **MolmoMotion-4B-H1-F32** | 1 | 32 | [allenai/MolmoMotion-4B-H1-F32](https://huggingface.co/allenai/MolmoMotion-4B-H1-F32) |
 
 ```bash
-huggingface-cli download allenai/MolmoMotion-4B-H3-F30 \
+hf download allenai/MolmoMotion-4B-H3-F30 \
     --local-dir checkpoints/MolmoMotion-4B-H3-F30
 ```
 
@@ -338,6 +353,16 @@ lets the loader drop split entries whose NPZ keys diverged upstream):
 
 ```bash
 python scripts/build_track_keys_cache.py
+```
+
+The training recipes log to [Weights & Biases](https://wandb.ai), so export
+your project and entity before launching (the run aborts with an error if
+either is unset):
+
+```bash
+export WANDB_PROJECT=molmo-motion
+export WANDB_ENTITY=<your-wandb-entity>
+# or disable logging entirely:  export WANDB_MODE=disabled
 ```
 
 ## Stage 1 — Pretrain (P=8, H=3, F=8, 40K steps)
@@ -554,7 +579,7 @@ hf_export/MolmoMotion-H3-F30/
 Push:
 
 ```bash
-huggingface-cli upload allenai/MolmoMotion-4B-H3-F30 \
+hf upload allenai/MolmoMotion-4B-H3-F30 \
     hf_export/MolmoMotion-H3-F30 .
 ```
 

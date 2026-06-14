@@ -823,8 +823,14 @@ class Trajectory3DDataset(Dataset):
     # ── hot3d_bench ───────────────────────────────────────────────────────
     def _build_hot3d_bench_entries(self):
         root = self.data_roots["hot3d_bench"]
-        captions_path = root / "captions.json"
-        captions = json.load(open(captions_path)) if captions_path.exists() else {}
+        captions_path = root / "hot3d_annotations.json"
+        if not captions_path.exists():
+            raise FileNotFoundError(
+                f"HOT3D annotations not found at {captions_path}. Download the "
+                f"PointMotionBench dataset (ships `hot3d/hot3d_annotations.json`) "
+                f"from allenai/PointMotionBench; see pointmotionbench/README.md."
+            )
+        captions = json.load(open(captions_path))
         entries = []
         for npz_path in sorted((root / "tracks").glob("*_3d.npz")):
             stem = npz_path.stem[:-3]   # strip "_3d"
@@ -925,6 +931,14 @@ class Trajectory3DDataset(Dataset):
     # ── davis_bench ───────────────────────────────────────────────────────
     def _build_davis_bench_entries(self):
         root = self.data_roots["davis_bench"]
+        captions_path = root / "davis_captions.json"
+        if not captions_path.exists():
+            raise FileNotFoundError(
+                f"DAVIS captions not found at {captions_path}. Download the "
+                f"PointMotionBench dataset (ships `davis/davis_captions.json`) "
+                f"from allenai/PointMotionBench."
+            )
+        captions = json.load(open(captions_path))
         entries = []
         for npz_path in sorted((root / "tracks").glob("*_3d.npz")):
             seq = npz_path.stem[:-3]
@@ -939,7 +953,7 @@ class Trajectory3DDataset(Dataset):
                 "file": seq,
                 "num_frames": T,
                 "fps": 30,
-                "caption": f"motion in DAVIS sequence {seq}",
+                "caption": captions[seq]["description"],
                 "clips_by_object": {obj0: [[0, T - 1]]},
                 "num_clips_total": 1,
             })
@@ -1582,7 +1596,21 @@ class Trajectory3DDataset(Dataset):
                     img = img[..., :3]
                 frames.append(img)
             return np.stack(frames, axis=0).astype(np.uint8)
+        if not os.path.exists(mp4_path):
+            raise FileNotFoundError(
+                f"Video not found: {mp4_path}. The molmo-motion-1m / PointMotionBench "
+                f"downloads do not include raw videos for every dataset — run the "
+                f"per-dataset reconstruction script first (e.g. "
+                f"`<dataset>/reconstruct_videos.py` for molmo-motion-1m, or the "
+                f"`pointmotionbench/hot3d/` rgbs rebuild for HOT3D eval). See the "
+                f"per-dataset README."
+            )
         cap = cv2.VideoCapture(mp4_path)
+        if not cap.isOpened():
+            cap.release()
+            raise RuntimeError(
+                f"Could not open video (corrupt file or unsupported codec): {mp4_path}"
+            )
         frames = []
 
         # Check if indices are consecutive → use fast sequential read

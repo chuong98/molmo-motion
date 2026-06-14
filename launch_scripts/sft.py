@@ -14,6 +14,7 @@ recipes and the dataset-name grammar (`molmo_motion/data/get_dataset.py`).
 
 import argparse
 import dataclasses
+import os
 from os.path import join
 from typing import List
 
@@ -209,21 +210,35 @@ def main():
     evaluations = [traj3d_eval]
 
     log_interval = 1 if args.debug else 20
+
+    if args.debug or os.environ.get("WANDB_MODE", "").lower() == "disabled":
+        wandb_cfg = None
+    else:
+        wandb_project = os.environ.get("WANDB_PROJECT")
+        wandb_entity = os.environ.get("WANDB_ENTITY")
+        if not wandb_project or not wandb_entity:
+            raise ValueError(
+                "Training logs to Weights & Biases: export WANDB_PROJECT and "
+                "WANDB_ENTITY before launching (or export WANDB_MODE=disabled to "
+                "turn logging off). See the Training section of the README."
+            )
+        wandb_cfg = WandbConfig(
+            name="${run_name}",
+            project=wandb_project,
+            group=None,
+            entity=wandb_entity,
+            log_interval=log_interval,
+            allow_resume=False,
+            finish_on_sigterm=True,
+        )
+
     cfg = TrainConfig(
         run_name="multitask_train",
         save_folder=omegaconf.MISSING,
         seed=6198,
         dry_run=False,
 
-        wandb=None if args.debug else WandbConfig(
-            name="${run_name}",
-            project="${oc.env:WANDB_PROJECT}",
-            group=None,
-            entity="${oc.env:WANDB_ENTITY}",
-            log_interval=log_interval,
-            allow_resume=False,
-            finish_on_sigterm=True
-        ),
+        wandb=wandb_cfg,
         compile=CompilerConfig(mode="default", dynamic=False),
         fused_loss=False,
         allow_resume=True,
