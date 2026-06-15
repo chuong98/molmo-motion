@@ -11,15 +11,15 @@ code live upstream.
 
 MolmoBot finetuning here needs trajectory-conditioning extensions
 (`--load_3d_tracks` / `--prompt_encoder_mode` / `--prompt_style`) that are not in
-public MolmoBot. Clone the **pinned** commit and apply the patch shipped in
-[`molmobot_traj/`](molmobot_traj/) — see [molmobot_traj/SETUP.md](molmobot_traj/SETUP.md)
+public MolmoBot. Clone current `main` and apply the patch + overlay shipped in
+[`molmobot_traj/`](molmobot_traj/) — see [molmobot_traj/README.md](molmobot_traj/README.md)
 for the full recipe (env + the torchcodec/FFmpeg note):
 
 ```bash
 git clone https://github.com/allenai/MolmoBot
-cd MolmoBot && git checkout d0d71e28        # pinned; HEAD will not apply
-git apply /path/to/robotics/molmobot_traj/molmobot_traj_d0d71e28.patch
-cp -r /path/to/robotics/molmobot_traj/new_files/olmo/* MolmoBot/olmo/
+cd MolmoBot
+git apply /path/to/robotics/molmobot_traj/trajectory_conditioning.patch
+cp -r /path/to/robotics/molmobot_traj/overlay/olmo/* MolmoBot/olmo/
 export MOLMOBOT_REPO="$PWD/MolmoBot"
 uv sync --extra train && uv pip install "torchcodec==0.4.*"
 ```
@@ -47,7 +47,7 @@ unpacked release, use `--release_root` instead of `--src_root`:
 
 ```bash
 python scripts/prepare_training_data.py \
-    --release_root /path/to/molmomotion-1m/molmospaces \
+    --release_root /path/to/molmo-motion-1m/molmospaces \
     --dst_root /path/to/train_view
 ```
 
