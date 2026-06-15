@@ -590,6 +590,17 @@ place benchmark. The [`robotics/`](robotics/) subdirectory contains the
 recipe.
 See [`robotics/README.md`](robotics/README.md) for the full walkthrough.
 
+# Acknowledgements
+
+MolmoMotion is trained on [MolmoMotion-1M](https://huggingface.co/datasets/allenai/molmo-motion-1m),
+which includes data derived from the
+[Xperience](https://huggingface.co/datasets/ropedia-ai/xperience-10m) dataset. We thank
+[Ropedia](https://huggingface.co/ropedia-ai) for Xperience.
+
+**Disclaimer:** The Xperience-derived data is subject to Ropedia's terms and conditions.
+Users who access or reconstruct that portion of the data must review and comply with the
+terms on the [Xperience dataset page](https://huggingface.co/datasets/ropedia-ai/xperience-10m).
+
 # Citation
 
 ```bibtex
