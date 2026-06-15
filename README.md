@@ -51,6 +51,7 @@ methodology and results.
   - [Installation](#installation)
   - [Downloading the Dataset and Benchmark](#downloading-the-dataset-and-benchmark)
   - [Downloading Released Models](#downloading-released-models)
+    - [Backbone init for training from scratch](#backbone-init-for-training-from-scratch)
 - [Quick Start](#quick-start)
 - [Data and benchmark construction](#data-and-benchmark-construction)
 - [Training](#training)
@@ -168,7 +169,6 @@ MolmoMotion.
 
 | Model | History H | Future F | HuggingFace |
 |---|---:|---:|---|
-| **MolmoMotion-4B-H3-Pretrain** | 3 | 8 | [allenai/MolmoMotion-4B-H3-Pretrain](https://huggingface.co/allenai/MolmoMotion-4B-H3-Pretrain) |
 | **MolmoMotion-4B-H3-F30** | 3 | 30 | [allenai/MolmoMotion-4B-H3-F30](https://huggingface.co/allenai/MolmoMotion-4B-H3-F30) |
 | **MolmoMotion-4B-H1-F32** | 1 | 32 | [allenai/MolmoMotion-4B-H1-F32](https://huggingface.co/allenai/MolmoMotion-4B-H1-F32) |
 
@@ -222,16 +222,15 @@ for downstream HF inference and is not needed (or supported) here.
 
 # Quick Start
 
-Below we run a single forward pass on a bundled clip, visualize the predicted
-trajectory, and write the result to disk. Expected wall-clock on a single
-80 GB A100: ~110 s for checkpoint load + ~40 s for `predict_trajectory()`.
+Below we run a single forward pass on a bundled clip and read the
+`(P, F, 3)` future trajectory. Expected wall-clock on a single 80 GB A100:
+~110 s for checkpoint load + ~40 s for `predict_trajectory()`.
 
 ```python
 import torch
 from PIL import Image
 
 from molmo_motion import MolmoMotion, MolmoMotionProcessor
-from molmo_motion.viz import overlay_trajectory_on_image
 
 CKPT = "allenai/MolmoMotion-4B-H3-F30"
 
@@ -246,15 +245,15 @@ model._internal = model._internal.to(torch.bfloat16).cuda()  # 4B params
 #       points_3d_history     — (H, P, 3) tensor in camera-frame-at-t₀
 #       action                — short action description
 #       future_horizon        — number of future frames to predict
-EXAMPLE_DIR = "examples/data/molmospaces_pick_place"
+EXAMPLE_DIR = "examples/data/quickstart/davis_car_turn"
 history_frames = [
     Image.open(f"{EXAMPLE_DIR}/frame_t-2.jpg"),
     Image.open(f"{EXAMPLE_DIR}/frame_t-1.jpg"),
     Image.open(f"{EXAMPLE_DIR}/frame_t+0.jpg"),
 ]
-points_2d_at_t0 = torch.load(f"{EXAMPLE_DIR}/points_2d_at_t0.pt")
+points_2d_at_t0   = torch.load(f"{EXAMPLE_DIR}/points_2d_at_t0.pt")
 points_3d_history = torch.load(f"{EXAMPLE_DIR}/points_3d_history.pt")
-action = "Pick up the salt shaker and place it in or on the rustic stone bowl with bird spout"
+action = open(f"{EXAMPLE_DIR}/caption.txt").read().strip()
 
 inputs = processor(
     history_frames=history_frames,
@@ -269,24 +268,22 @@ inputs = {k: v.cuda() if torch.is_tensor(v) else v for k, v in inputs.items()}
 with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
     out = model.predict_trajectory(**inputs)
 
-# 4. Result: (P=8, F=30, 3) camera-frame XYZ in meters.
-print(f"future_3d.shape: {tuple(out.future_3d.shape)}")
-print(f"future_text:     {out.future_text[:120]}...")
+# 4. `out.future_3d` is the decoded prediction: a (P=8, F=30, 3) tensor of
+#    absolute camera-frame XYZ coordinates in meters, one row per future
+#    frame, for each of the 8 query points (no further parsing needed —
+#    `predict_trajectory` already turned the raw `<tracks>` block into
+#    floats and added the anchor back).
+future_3d = out.future_3d.cpu().numpy()          # (8, 30, 3), meters
+print(f"future_3d.shape: {future_3d.shape}")
 
-# 5. Visualize: project the predicted 3D trajectory back into the t₀ image.
-img = overlay_trajectory_on_image(
-    history_frames[-1],
-    points_2d_at_t0=points_2d_at_t0,
-    future_3d=out.future_3d,
-    intrinsics=torch.load(f"{EXAMPLE_DIR}/intrinsics_K.pt"),
-)
-img.save("quickstart_overlay.png")
+# Per-point predicted positions at the first future frame (= t₀ + 1):
+for pi in range(future_3d.shape[0]):
+    x, y, z = future_3d[pi, 0]
+    print(f"  point {pi}: (x={x:+.3f}, y={y:+.3f}, z={z:+.3f}) m")
+
+# Point 0's full predicted trajectory across all 30 future frames:
+print(f"point 0 trajectory (F=30): {future_3d[0].round(3).tolist()}")
 ```
-
-The same flow is in [`examples/01_quickstart.py`](examples/01_quickstart.py).
-For a multi-view 3D scatter visualization instead of a 2D overlay,
-`overlay_trajectory_on_image` has a sibling `render_trajectory_3d`
-that uses matplotlib.
 
 # Data and benchmark construction
 

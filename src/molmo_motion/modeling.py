@@ -133,7 +133,13 @@ class MolmoMotion(PreTrainedModel):
                 parsed trajectory tensor to a known shape.
         """
         if max_new_tokens is None:
-            max_new_tokens = 48 * future_horizon
+            # Match the production eval budget: every future frame emits up to
+            # ~160 quantized-coord tokens (P=8 points × {obj_id, x, y, z} +
+            # frame timestamp + separators). 48 × F was a guesstimate that
+            # truncates the `<tracks>` block before the closing quote, leaving
+            # the regex parser unable to recover any frames. 160 × F leaves
+            # comfortable slack and matches the cached predictions byte-for-byte.
+            max_new_tokens = 160 * future_horizon
 
         batch = {"input_ids": input_ids, "attention_mask": attention_mask}
         if images is not None:
@@ -180,10 +186,12 @@ class MolmoMotion(PreTrainedModel):
         future_3d = torch.from_numpy(np.asarray(delta, dtype=np.float32))
         # Add the anchor (camera-frame XYZ at t_0) back to recover absolute
         # camera-frame coords. The processor stashes this in `batch_extras`.
+        # `anchor_3d` is a single shared (3,) point — see processor for the
+        # training-convention anchor choice.
         anchor_3d = batch_extras.get("anchor_3d")
         if anchor_3d is not None:
-            anchor = anchor_3d.detach().cpu().squeeze(0)  # (P, 3)
-            future_3d = future_3d + anchor.unsqueeze(1)
+            anchor = anchor_3d.detach().cpu().squeeze(0)  # (3,)
+            future_3d = future_3d + anchor  # (P, F, 3) + (3,) broadcasts
         return MolmoMotionOutput(future_3d=future_3d, future_text=future_text)
 
     def forward(self, *args, **kwargs):  # noqa: D401 — required by PreTrainedModel

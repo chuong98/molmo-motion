@@ -41,9 +41,10 @@ def _quantize(v: float) -> int:
 def _format_history_tracks(points_3d_history: np.ndarray, anchor: np.ndarray) -> str:
     """Serialize `(H, P, 3)` camera-frame history into `<tracks coords="...">`
     text using the same delta-from-anchor + ×1000 quantization the training
-    pipeline uses."""
+    pipeline uses. `anchor` is a single shared (3,) reference point — point 0
+    at the last history frame — matching `Trajectory3DDataset._build_example`."""
     H, P, _ = points_3d_history.shape
-    deltas = points_3d_history - anchor[None, :, :]
+    deltas = points_3d_history - anchor[None, None, :]
     frame_strings = []
     for fi in range(H):
         parts = [f"{float(fi):.1f}"]
@@ -173,7 +174,9 @@ class MolmoMotionProcessor:
             points_3d_history = pts.reshape(H_expected, P, 3)
 
         history_np = points_3d_history.cpu().numpy()
-        anchor = history_np[-1]
+        # Anchor: point 0 at the last history frame (training convention,
+        # see `Trajectory3DDataset._build_example`).
+        anchor = history_np[-1, 0, :]
         history_tracks = _format_history_tracks(history_np, anchor)
 
         F = int(future_horizon)
@@ -227,8 +230,8 @@ class MolmoMotionProcessor:
         out["future_horizon"] = F
         # Stash the anchor (camera-frame XYZ at t_0) so `predict_trajectory`
         # can convert the model's delta-from-anchor output back to absolute
-        # camera-frame coordinates.
-        out["anchor_3d"] = torch.from_numpy(anchor.astype(np.float32)).unsqueeze(0)  # (1, P, 3)
+        # camera-frame coordinates. Single (3,) point shared across all P points.
+        out["anchor_3d"] = torch.from_numpy(anchor.astype(np.float32)).unsqueeze(0)  # (1, 3)
         # And the history size (the start_timestamp of the first future
         # frame is `H` — the next integer after the last history frame at
         # H-1).

@@ -1,0 +1,30 @@
+{
+  "id": "egodex_stack_plates",
+  "dataset": "egodex",
+  "video": "part5_stack_unstack_plates_6243",
+  "obj": "object",
+  "t0_absolute": 8,
+  "history_frame_indices": [
+    6,
+    7,
+    8
+  ],
+  "point_indices": [
+    1,
+    4,
+    7,
+    11,
+    16,
+    20,
+    21,
+    23
+  ],
+  "n_points": 8,
+  "history_size": 3,
+  "image_size_wh": [
+    854,
+    480
+  ],
+  "has_intrinsics": true,
+  "caption": "stack blue plastic plate, red plastic plate, yellow plastic plate together"
+}

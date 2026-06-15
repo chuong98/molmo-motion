@@ -1,0 +1,30 @@
+{
+  "id": "egodex_pour_water",
+  "dataset": "egodex",
+  "video": "part4_scoop_dump_ice_596",
+  "obj": "object",
+  "t0_absolute": 11,
+  "history_frame_indices": [
+    9,
+    10,
+    11
+  ],
+  "point_indices": [
+    5,
+    7,
+    12,
+    17,
+    23,
+    30,
+    32,
+    43
+  ],
+  "n_points": 8,
+  "history_size": 3,
+  "image_size_wh": [
+    854,
+    480
+  ],
+  "has_intrinsics": true,
+  "caption": "pour water from yellow cup into gray container"
+}
