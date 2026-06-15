@@ -13,7 +13,7 @@
   <a href="https://allenai.org/blog/molmo-motion">
     <img alt="Blog" src="https://img.shields.io/badge/MolmoMotion-blog-F0529C">
   </a>
-  <a href="https://huggingface.co/collections/allenai/molmo-motion">
+  <a href="https://huggingface.co/collections/allenai/molmomotion">
     <img alt="Models" src="https://img.shields.io/badge/%F0%9F%A4%97%20HF-Models-yellow">
   </a>
   <a href="https://huggingface.co/datasets/allenai/molmo-motion-1m">

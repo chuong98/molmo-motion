@@ -63,7 +63,7 @@ dev = [
 
 [project.urls]
 Repository = "https://github.com/allenai/molmo-motion"
-Models = "https://huggingface.co/collections/allenai/molmo-motion"
+Models = "https://huggingface.co/collections/allenai/molmomotion"
 Dataset = "https://huggingface.co/datasets/allenai/molmo-motion-1m"
 
 [project.scripts]
