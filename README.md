@@ -185,12 +185,7 @@ Pick H=3 / F=30 for typical video use (3 history frames, predict 2 seconds at
 Stage-1 training (see [Training](#training)) starts from the
 **`Molmo2-4B-Pretrain`** checkpoint — the pretrain stage of
 [Molmo2](https://github.com/allenai/molmo2), released by Ai2
-alongside the Molmo2 codebase. The other two Molmo2-4B distributions
-(`Molmo2-4B-SFT.tar` and `Molmo2-4B.tar`, the long-context-SFT variant)
-contain extra config fields the trajectory trainer does not recognize
-(e.g. `use_image_augmentation`) and **cannot** be substituted.
-
-Download URL is published in the Molmo2 README's
+alongside the Molmo2 codebase. Download URL is published in the Molmo2 README's
 [Checkpoints table](https://github.com/allenai/molmo2#checkpoints):
 
 ```bash
@@ -198,27 +193,10 @@ wget https://storage.googleapis.com/oe-training-public/Molmo2-1225/Molmo2-4B-Pre
 tar -xvf Molmo2-4B-Pretrain.tar
 # The extracted folder is what `/path/to/Molmo2-4B-Pretrain` refers to in Stage 1.
 ```
-
 `oe-training-public` is an unauthenticated GCS bucket, so the `wget`
 above works without any `gcloud` credentials.
 
-After extraction the folder contains an OLMo-native **sharded `distcp`**
-checkpoint:
 
-```
-Molmo2-4B-Pretrain/
-├── config.yaml
-└── step32000/
-    ├── config.yaml
-    ├── model_and_optim/__0_*.distcp
-    └── train/
-```
-
-Pass the top-level `Molmo2-4B-Pretrain/` path to
-`launch_scripts/sft.py` as-is — the trainer reads the sharded format
-directly via FSDP2. Do **not** run the
-`convert_to_unsharded.py` step from the MolmoBot README; that step is
-for downstream HF inference and is not needed (or supported) here.
 
 # Quick Start
 
