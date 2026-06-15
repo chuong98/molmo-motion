@@ -67,8 +67,3 @@ python scripts/prepare_training_data.py \
 # 3. finetune
 bash launch_scripts/train.sh configs/molmobot_pickplace.yaml
 ```
-
-## Validation
-
-Verified against current MolmoBot `main`: the patch applies cleanly, the overlay
-modules drop in, and the patched + new modules compile.
