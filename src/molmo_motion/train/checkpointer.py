@@ -44,7 +44,12 @@ def load_model_state_unsharded(dir: PathOrStr, model: nn.Module):
     Load model state in-place for unsharded chechpoint saved in `dir`,
     works for sharded and unsharded models
     """
-    if get_global_rank() == 0:
+    # Single-process inference (e.g. the public `from_pretrained` quickstart)
+    # has no torch.distributed process group. `broadcast_from_rank0=True`
+    # requires one (it calls `dist.get_rank()`), so detect that case and load
+    # the full state dict directly on the single rank instead of broadcasting.
+    distributed = torch.distributed.is_available() and torch.distributed.is_initialized()
+    if (not distributed) or get_global_rank() == 0:
         state_dict = torch.load(resource_path(dir, MODEL_FILENAME),
                                 map_location="cpu", weights_only=True)
     else:
@@ -52,7 +57,8 @@ def load_model_state_unsharded(dir: PathOrStr, model: nn.Module):
     dist_cp_sd.set_model_state_dict(
         model=model,
         model_state_dict=state_dict,
-        options=dist_cp_sd.StateDictOptions(full_state_dict=True, broadcast_from_rank0=True)
+        options=dist_cp_sd.StateDictOptions(
+            full_state_dict=True, broadcast_from_rank0=distributed)
     )
 
 
