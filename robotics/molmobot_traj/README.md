@@ -70,12 +70,5 @@ bash launch_scripts/train.sh configs/molmobot_pickplace.yaml
 
 ## Validation
 
-- **2026-06-15** — re-verified against current MolmoBot `main`: the patch applies
-  cleanly, the overlay modules drop in, and all 13 patched + overlay Python files
-  byte-compile. The 10 patched files are unchanged on `main` since the original
-  end-to-end run, so no rebase was needed.
-- Original end-to-end smoke test (1×L40S): `prepare_training_data.py
-  --release_root` builds the training view; `train_molmobot.py` builds the
-  598M-param policy (578M VLM + 19.3M ActionExpert), loads the MolmoMotion init
-  (reinitializing the action expert), and runs training steps with real
-  flow-matching loss (`train/flow_loss_*`).
+Verified against current MolmoBot `main`: the patch applies cleanly, the overlay
+modules drop in, and the patched + new modules compile.
