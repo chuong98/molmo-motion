@@ -78,6 +78,71 @@ SCENARIO_CAMERAS: dict[str, list[str]] = {
 }
 
 
+# ── Flat HF-release layout adapter ──────────────────────────────────────────
+# The molmo-motion-1m release ships robot trajectories flat:
+#   <release>/robot_trajectories/{scenario}__{house}.h5
+#   <release>/videos/{scenario}__{house}__{episode}__{cam}.mp4
+# `--release_root` rebuilds the nested <scenario>/house_*/ layout (via symlinks)
+# that the rest of this script expects, so it works straight off an unpacked
+# HF download without re-downloading the raw data-gen tree.
+RELEASE_H5_RE = re.compile(r"^(?P<scenario>.+)__(?P<house>house_\d+)\.h5$")
+RELEASE_MP4_RE = re.compile(
+    r"^(?P<scenario>.+?)__(?P<house>house_\d+)__(?P<ep>\d{8})__(?P<cam>.+)\.mp4$")
+
+
+def materialize_from_release(
+    release_root: Path, work_dir: Path, task_dirs: list[str]
+) -> Path:
+    """Build a nested <scenario>/house_*/ symlink tree from the flat release."""
+    release_root = Path(release_root)
+    h5_dir = release_root / "robot_trajectories"
+    vid_dir = release_root / "videos"
+    if not h5_dir.is_dir():
+        raise FileNotFoundError(
+            f"{h5_dir} not found — point --release_root at an unpacked "
+            f"molmospaces/ release dir (with robot_trajectories/ + videos/)."
+        )
+    if not vid_dir.is_dir():
+        raise FileNotFoundError(f"{vid_dir} not found under {release_root}.")
+    keep = set(task_dirs) if task_dirs else None
+
+    n_h5 = 0
+    for h5 in sorted(h5_dir.glob("*.h5")):
+        m = RELEASE_H5_RE.match(h5.name)
+        if not m:
+            continue
+        scen, house = m.group("scenario"), m.group("house")
+        if keep is not None and scen not in keep:
+            continue
+        hd = work_dir / scen / house
+        hd.mkdir(parents=True, exist_ok=True)
+        link = hd / "trajectories_batch_1_of_1.h5"
+        if not link.is_symlink() and not link.exists():
+            link.symlink_to(h5.resolve())
+        n_h5 += 1
+
+    n_mp4 = 0
+    for mp4 in sorted(vid_dir.glob("*.mp4")):
+        m = RELEASE_MP4_RE.match(mp4.name)
+        if not m:
+            continue
+        scen, house = m.group("scenario"), m.group("house")
+        if keep is not None and scen not in keep:
+            continue
+        hd = work_dir / scen / house
+        if not hd.is_dir():  # only houses that have a shipped h5
+            continue
+        link = hd / f"episode_{m.group('ep')}_{m.group('cam')}_batch_1_of_1.mp4"
+        if not link.is_symlink() and not link.exists():
+            link.symlink_to(mp4.resolve())
+        n_mp4 += 1
+
+    log.info(
+        f"[release] materialized {n_h5} h5 + {n_mp4} mp4 symlinks under {work_dir}"
+    )
+    return work_dir
+
+
 def discover_houses(src_dir: Path) -> list[Path]:
     houses = sorted(
         p for p in src_dir.iterdir() if p.is_dir() and p.name.startswith("house_")
@@ -260,9 +325,16 @@ def main() -> int:
         datefmt="%Y-%m-%d %H:%M:%S",
     )
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument(
-        "--src_root", required=True, type=Path,
-        help="Raw data-gen root (one directory per task underneath).",
+    src = p.add_mutually_exclusive_group(required=True)
+    src.add_argument(
+        "--src_root", type=Path, default=None,
+        help="Raw data-gen root (one <task>/house_*/ directory per task).",
+    )
+    src.add_argument(
+        "--release_root", type=Path, default=None,
+        help="Unpacked molmo-motion-1m molmospaces/ release dir (flat "
+        "robot_trajectories/*.h5 + videos/*.mp4). Rebuilt into the nested "
+        "layout via symlinks before preparing.",
     )
     p.add_argument(
         "--dst_root", required=True, type=Path,
@@ -286,6 +358,16 @@ def main() -> int:
     args = p.parse_args()
 
     args.dst_root.mkdir(parents=True, exist_ok=True)
+
+    if args.release_root is not None:
+        work = args.dst_root / "_release_raw_view"
+        log.info(
+            f"release_root = {args.release_root} -> materializing nested "
+            f"layout at {work}"
+        )
+        materialize_from_release(args.release_root, work, args.task_dirs)
+        args.src_root = work
+
     log.info(f"src_root  = {args.src_root}")
     log.info(f"dst_root  = {args.dst_root}")
     log.info(f"task_dirs = {args.task_dirs}")

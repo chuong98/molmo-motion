@@ -1,0 +1,1860 @@
+diff --git a/MolmoBot/launch_scripts/train_molmobot.py b/MolmoBot/launch_scripts/train_molmobot.py
+index 45729e7..b4891cf 100644
+--- a/MolmoBot/launch_scripts/train_molmobot.py
++++ b/MolmoBot/launch_scripts/train_molmobot.py
+@@ -67,6 +67,49 @@ from olmo.util import prepare_torchrun_environment, clean_opt, select_checkpoint
+ from olmo.train_init_utils import compute_state_action_normalization_stats, get_synthmanip_training_data, validate_data_path
+ 
+ 
++def autodetect_traj3d_hyperparams(checkpoint: Optional[str]) -> dict:
++    """Parse P/H/F/prompt_style out of an init checkpoint's config.yaml.
++
++    Looks at ``data.kwargs_mixture[0].datasets[0].dataset_name`` which for our
++    molmo2 trajectory runs follows the grammar documented in
++    ``claude_tasks/molmo2-world-model/model_doc.md §6.2``:
++
++        trajectory_3d[_v1match][...]_p<P>_h<H>_f<F>
++
++    Missing fields are returned as None so the CLI override path can fill them
++    with hardcoded defaults. Swallows *any* parse error (returning all-None);
++    this helper is pure convenience — it never fails the training.
++    """
++    import re
++    import yaml
++
++    out = {"num_points": None, "history_size": None, "num_future_frames": None, "prompt_style": None}
++    if not checkpoint:
++        return out
++    cfg_path = os.path.join(checkpoint, "config.yaml")
++    if not os.path.exists(cfg_path):
++        return out
++    try:
++        with open(cfg_path) as f:
++            cfg = yaml.safe_load(f)
++        ds_name = ""
++        try:
++            ds_name = cfg["data"]["kwargs_mixture"][0]["datasets"][0]["dataset_name"]
++        except (KeyError, IndexError, TypeError):
++            pass
++        if not isinstance(ds_name, str) or not ds_name.startswith("trajectory_3d"):
++            return out
++        m = re.search(r"_p(\d+)_h(\d+)_f(\d+)", ds_name)
++        if m:
++            out["num_points"] = int(m.group(1))
++            out["history_size"] = int(m.group(2))
++            out["num_future_frames"] = int(m.group(3))
++        out["prompt_style"] = "v1_match" if "_v1match" in ds_name else "default"
++    except Exception:
++        pass
++    return out
++
++
+ def get_model(checkpoint: Optional[str], model_type: str) -> MolmoBotConfig:
+     """Build MolmoBotConfig from checkpoint or default configuration."""
+     if checkpoint and file_exists(join(checkpoint, "model.yaml")):
+@@ -128,7 +171,13 @@ def get_model(checkpoint: Optional[str], model_type: str) -> MolmoBotConfig:
+     model_cfg.mm_preprocessor.image.max_multi_image_crops = 1
+     model_cfg.mm_preprocessor.image.max_images = 2
+ 
+-    model_cfg.llm.max_sequence_length = 4096 * 2
++    # Preserve the source checkpoint's max_sequence_length unless explicitly
++    # overridden. Our modified Molmo2 (traj3d_7ds_h3_f16) was trained with
++    # seq_len=6144 on dense 3D-trajectory text; overriding to 8192 would not
++    # cause a crash but would waste RoPE cache / position ids beyond what the
++    # weights saw. The public Molmo2-4B has seq_len=16384 so the previous
++    # hardcoded 4096*2 was already a down-shift; we just make that explicit.
++    # Override via --llm_max_sequence_length if needed.
+ 
+     # Reduce shared memory requirements
+     model_cfg.vision_backbone.normalize_on_gpu = True
+@@ -141,6 +190,10 @@ def get_model(checkpoint: Optional[str], model_type: str) -> MolmoBotConfig:
+         model_cfg.action_expert.max_horizon, model_cfg.action_horizon
+     )
+ 
++    # text_ce_loss_weight is plumbed in by main() after args are parsed;
++    # default 0 here keeps legacy no-text-loss behaviour.
++    model_cfg.text_ce_loss_weight = 0.0
++
+     return model_cfg
+ 
+ 
+@@ -255,6 +308,58 @@ def main():
+     parser.add_argument("--max_exo_views", type=int, default=1, help="Maximum number of exo views per frame (default: 1)")
+     parser.add_argument("--exp_name", type=str, default="molmobot_training", help="Unique experiment name.")
+ 
++    # Phase-2 (merged trajectory-3D + MolmoBot) options.
++    parser.add_argument(
++        "--load_3d_tracks", action="store_true",
++        help="Enable merged Molmo2Trajectory + MolmoBot training: read NPZ "
++        "point tracks, inject <tracks> history into prompt, emit <tracks> GT as "
++        "answer, and jointly train LLM CE + ActionExpert flow-matching MSE.",
++    )
++    parser.add_argument("--predict_camera", type=str, default="exo_camera_1",
++                        choices=["exo_camera_1", "wrist_camera"],
++                        help="Which camera's point_tracks.npz to read as the 3D "
++                        "prediction target. Both cameras still feed the VLM as input.")
++    # P/H/F/prompt_style default to None so autodetect_traj3d_hyperparams can
++    # fill them from the init checkpoint's trajectory_3d dataset name. CLI
++    # overrides win when explicitly set.
++    parser.add_argument("--num_points", type=int, default=None,
++                        help="Number of points to sample from the pickup object. "
++                        "If unset, auto-detected from the checkpoint's dataset_name "
++                        "(e.g. _p8_h3_f8 -> P=8). Fallback default: 1.")
++    parser.add_argument("--history_size", type=int, default=None,
++                        help="H: history frames in the <tracks> prompt. Auto-detected if unset. Fallback: 3.")
++    parser.add_argument("--num_future_frames", type=int, default=None,
++                        help="F: future frames in the <tracks> answer. Auto-detected if unset. Fallback: 16.")
++    parser.add_argument("--history_stride", type=int, default=1,
++                        help="Sim-step stride between history frames. Default 1 (dense).")
++    parser.add_argument("--future_stride", type=int, default=1,
++                        help="Sim-step stride between future frames. Use >1 to span "
++                        "action_horizon with fewer tokens (e.g. F=8 FS=2 covers 16 sim steps).")
++    parser.add_argument("--prompt_style", type=str, default="auto",
++                        choices=["auto", "default", "v1_match"],
++                        help="Trajectory-3D prompt/answer format. 'auto' detects from "
++                        "the init checkpoint's dataset_name ('_v1match' -> v1_match, "
++                        "else default). Hard-set if you need a specific format.")
++    parser.add_argument("--sample_phases", type=str, default="5,6,7,8",
++                        help="Comma-separated policy_phase IDs eligible for step "
++                        "sampling during training (default: lift, preplace, place, retreat).")
++    parser.add_argument("--text_ce_loss_weight", type=float, default=1.0,
++                        help="Weight on the LM CE loss when <tracks> answer is non-empty. "
++                        "Applied as total = action_flow_loss + w * text_ce_loss.")
++    parser.add_argument("--prompt_encoder_mode", action="store_true",
++                        help="Use the Molmo2 backbone purely as a prompt encoder for the "
++                        "ActionExpert: strip the <tracks> history block from the prompt "
++                        "(keep only the 'Predict ... given action: \"X\",' prefix), leave "
++                        "answers empty, and force text_ce_loss_weight=0. Useful for ablations "
++                        "that isolate the ActionExpert contribution while still reusing the "
++                        "trajectory-3D-aware init weights.")
++    parser.add_argument("--dataset_class", type=str, default="synthmanip",
++                        choices=["synthmanip", "droid"],
++                        help="Which dataset backend to use. 'synthmanip' (default) consumes "
++                        "MolmoSpaces-style train/val/house_X/h5 trees. 'droid' consumes a "
++                        "JSON index file produced by build_droid_index.py — each --data_path "
++                        "is then a path to one such droid_index.json.")
++
+     args, other_args = parser.parse_known_args()
+ 
+     # Handle action preset
+@@ -327,6 +432,25 @@ def main():
+ 
+     # Build model config
+     checkpoint = select_checkpoint(args.checkpoint)
++
++    # Phase-2 auto-detect: fill any Trajectory-3D hyperparams the user left unset
++    # from the init checkpoint's trajectory_3d dataset_name (e.g.
++    # "trajectory_3d_v1match_droid_molmospaces_p16_h3_f8" -> v1_match, P=16, H=3, F=8).
++    # Hardcoded fallbacks (1 / 3 / 16 / "default") only fire when the checkpoint
++    # doesn't carry a trajectory_3d dataset in its config.yaml.
++    autodetected = autodetect_traj3d_hyperparams(checkpoint)
++    if args.num_points is None:
++        args.num_points = autodetected["num_points"] if autodetected["num_points"] else 1
++    if args.history_size is None:
++        args.history_size = autodetected["history_size"] if autodetected["history_size"] else 3
++    if args.num_future_frames is None:
++        args.num_future_frames = autodetected["num_future_frames"] if autodetected["num_future_frames"] else 16
++    if args.prompt_style == "auto":
++        args.prompt_style = autodetected["prompt_style"] if autodetected["prompt_style"] else "default"
++    print(f"[phase2] P={args.num_points} H={args.history_size} F={args.num_future_frames} "
++          f"prompt_style={args.prompt_style} "
++          f"(autodetected={autodetected})")
++
+     model_cfg = get_model(checkpoint, args.model)
+ 
+     model_cfg.mm_preprocessor.max_subtitle_tokens = None
+@@ -336,6 +460,50 @@ def main():
+     model_cfg.n_obs_steps = args.n_obs_steps
+     model_cfg.obs_step_delta = args.obs_step_delta
+     model_cfg.n_action_steps = args.n_action_steps
++    # Phase-2: joint LLM CE + ActionExpert flow-matching loss.
++    # Applied in trainer.train_batch when the batch carries a non-empty answer span.
++    # prompt_encoder_mode forces text_ce_loss_weight=0 regardless of the CLI flag
++    # because the answer span is empty in that mode.
++    if args.load_3d_tracks and not args.prompt_encoder_mode:
++        model_cfg.text_ce_loss_weight = args.text_ce_loss_weight
++    else:
++        model_cfg.text_ce_loss_weight = 0.0
++
++    # Phase-2: record the trajectory-3D prompt wrapper used at training time so
++    # the inference wrapper can reproduce it at eval. Only fire in prompt-encoder
++    # mode (full joint mode already emits the full prompt as text, not a wrapper).
++    if args.load_3d_tracks and args.prompt_encoder_mode:
++        model_cfg.eval_prompt_wrapper = args.prompt_style
++        model_cfg.eval_prompt_num_points = args.num_points
++        model_cfg.eval_prompt_num_future_frames = args.num_future_frames
++    else:
++        model_cfg.eval_prompt_wrapper = "none"
++
++    # Phase-2 joint-mode eval: SynthVLAPolicy reconstructs the full default-style
++    # prompt (header + quoted caption + history 3D tracks embedded inline) at
++    # eval time so the distribution matches what the model saw during training.
++    # History tracks are computed on-the-fly from per-frame pickup-object poses
++    # (ObjectPoseSensor). Only meaningful when load_3d_tracks=True AND NOT
++    # prompt_encoder_mode (i.e. Job B). In prompt-encoder mode the InferenceWrapper
++    # already reproduces the truncated prefix via eval_prompt_wrapper.
++    model_cfg.eval_emit_real_history_tracks = bool(args.load_3d_tracks and not args.prompt_encoder_mode)
++    model_cfg.eval_prompt_num_points = args.num_points
++    model_cfg.eval_prompt_num_future_frames = args.num_future_frames
++    model_cfg.eval_prompt_history_size = args.history_size
++    model_cfg.eval_prompt_history_stride = args.history_stride
++    model_cfg.eval_prompt_future_stride = args.future_stride
++
++    # Phase-2 joint-mode eval-time train/eval-gap closure: when this ckpt was
++    # trained with future-traj supervision (joint mode), the ActionExpert saw
++    # layer states over [prompt + GT future tracks] at training. Turning this
++    # flag on makes ``generate_actions`` run the LM decode first at eval,
++    # concat the generated answer tokens, and refeed the forward so
++    # ActionExpert sees layer states over [prompt + LM-generated future
++    # tracks]. Only meaningful when text_ce_loss_weight > 0 (i.e. the LM was
++    # actually supervised to emit the answer).
++    model_cfg.eval_condition_action_on_generated = bool(
++        args.load_3d_tracks and not args.prompt_encoder_mode
++    )
+     model_cfg.action_expert.max_horizon = max(
+         model_cfg.action_expert.max_horizon, args.action_horizon
+     )
+@@ -460,6 +628,17 @@ def main():
+         state_spec=state_spec,
+         state_indices=state_indices,
+         max_exo_views=args.max_exo_views,
++        load_3d_tracks=args.load_3d_tracks,
++        predict_camera=args.predict_camera,
++        num_points=args.num_points,
++        history_size=args.history_size,
++        num_future_frames=args.num_future_frames,
++        history_stride=args.history_stride,
++        future_stride=args.future_stride,
++        sample_phases=[int(p) for p in args.sample_phases.split(",") if p.strip()],
++        prompt_style=args.prompt_style,
++        prompt_encoder_mode=args.prompt_encoder_mode,
++        dataset_class=args.dataset_class,
+     )
+ 
+     # Register separate val datasets if --val_data_paths is provided
+diff --git a/MolmoBot/olmo/data/synthmanip_config.py b/MolmoBot/olmo/data/synthmanip_config.py
+index e09b97a..cd9757e 100644
+--- a/MolmoBot/olmo/data/synthmanip_config.py
++++ b/MolmoBot/olmo/data/synthmanip_config.py
+@@ -8,7 +8,7 @@ in training scripts without pulling in heavy dataset dependencies.
+ import logging
+ from copy import deepcopy
+ from dataclasses import dataclass, field
+-from typing import Any, Dict, List, Optional, Union
++from typing import Any, Dict, List, Optional, Tuple, Union
+ 
+ from olmo.data.robot_processing import RobotProcessorConfig
+ 
+@@ -147,6 +147,111 @@ class SynthmanipDatasetConfig:
+     Adds ``policy_phase`` (int) and ``policy_phase_name`` (str) to the returned dict.
+     """
+ 
++    # ── Phase 2 (3D trajectory) fields ─────────────────────────────────────────
++    load_3d_tracks: bool = False
++    """Enable merged Molmo2Trajectory + MolmoBot training.
++
++    When True, the dataset reads ``episode_*_<predict_camera>_point_tracks.npz``
++    alongside the h5, builds a merged prompt containing history 3D tracks, and
++    emits a non-empty ``<tracks>`` answer so the LLM gets supervised CE loss
++    jointly with the ActionExpert flow-matching loss. See
++    :class:`olmo.data.synthmanip_tracks_dataset.SynthmanipTracksDataset`.
++    """
++
++    predict_camera: str = "exo_camera_1"
++    """Which camera's point_tracks.npz to read for 3D-track GT.
++
++    Both cameras are always fed to the VLM as input images; this field only
++    selects which camera's 3D coordinates are the prediction target.
++    Typical values: ``"exo_camera_1"`` (side view) or ``"wrist_camera"`` (arm-mounted).
++    """
++
++    num_points: int = 1
++    """Number of tracked points sampled from the pickup object per example."""
++
++    history_size: int = 3
++    """Number of history frames (H) fed into the prompt."""
++
++    num_future_frames: int = 16
++    """Number of future frames (F) the model predicts in <tracks> text."""
++
++    history_stride: int = 1
++    """Sim-step stride between consecutive history frames. H=3 HS=1 -> dense
++    (step-2, step-1, step)."""
++
++    future_stride: int = 1
++    """Sim-step stride between consecutive future frames. Used to span the
++    same physical time window as ``action_horizon`` without bumping F. Example:
++    F=8 FS=2 -> 8 frames at step+2, step+4, ..., step+16 (covers 16 sim steps,
++    matches action_horizon=16)."""
++
++    sample_phases: Tuple[int, ...] = (5, 6, 7, 8)
++    """Policy-phase IDs that are eligible for step sampling.
++
++    Default {5 lift, 6 preplace, 7 place, 8 retreat} covers the "object in
++    gripper / on receptacle" window. During eval, steps outside this set
++    follow the scripted oracle action.
++    """
++
++    exo_camera_candidates: Optional[List[str]] = None
++    """If set, each example picks ONE exo camera uniformly at random from this
++    list. Replaces the "exo slot" in ``camera_names`` at get-time. Used for
++    the 5-cam scenarios where we want random 2-of-5 sampling per batch.
++    ``camera_names[0]`` is treated as the exo slot by convention.
++    """
++
++    wrist_camera_candidates: Optional[List[str]] = None
++    """Like ``exo_camera_candidates`` but for the wrist slot (``camera_names[1]``).
++    Typically ``[wrist_camera_zed_mini]`` (single option) for 5-cam scenarios.
++    """
++
++    predict_camera_follows_exo: bool = False
++    """If True (SynthmanipTracksDataset only), the per-example NPZ read from
++    disk switches to match whichever exo camera was sampled (instead of using
++    a fixed ``predict_camera``). Enabled when ``exo_camera_candidates`` is set.
++    """
++
++    prompt_encoder_mode: bool = False
++    """Use our Molmo2 purely as a prompt encoder for the ActionExpert.
++
++    When True:
++      - The ``<tracks>`` history block is **stripped** from the prompt; only the
++        Trajectory-3D prefix (``"Predict the future 3D point coordinates of {P}
++        points over {F_actual} timestamps, given action: \"{c}\","``) remains
++        so the LLM hidden states recognize the task type.
++      - The answer span is left empty (``answers=""``), matching vanilla
++        MolmoBot's no-text-loss recipe.
++      - No NPZ is loaded — this mode does not need 3D point tracks.
++      - Downstream, ``train_molmobot.py`` forces
++        ``MolmoBotConfig.text_ce_loss_weight=0.0`` so the LM CE does not enter
++        the total loss.
++
++    Meant for ablations where we want to isolate the ActionExpert-only
++    contribution while still benefiting from the trajectory-3D-aware
++    backbone weights in our init checkpoint.
++    """
++
++    prompt_style: str = "default"
++    """Which Trajectory3D-style prompt/answer format to emit.
++
++    - ``"default"`` (newer molmo2 runs, e.g. traj3d_*_p{P}_h{H}_f{F}):
++        ``"Predict the future 3D point coordinates of {P} points over
++        {F_actual} timestamps, given action: \"{caption}\", and history 3d
++        point coordinates: \"<tracks coords=\"...\">3d object history</tracks>\"."``
++      Answer label: ``"3d object trajectories"``. F in the prompt text is
++      *dynamic* (n_actual_future, clamped to the remaining clip length).
++
++    - ``"v1_match"`` (v1-era runs, e.g. traj3d_droid_v1 / *_v1match_*):
++        ``"Predict the future 3D trajectories of {P} points over {F_nominal}
++        timestamps, given action: {caption}, and {H} history frames:\\n<tracks
++        coords=\"...\">object points</tracks>"``
++      Answer label: ``"object points"`` (same on both sides). F in the prompt
++      text is the *nominal* ``num_future_frames`` (static).
++
++    Pick whichever matches the init checkpoint; bit-identical prompt is required
++    so the LLM's existing supervised response distribution stays compatible.
++    """
++
+     # ── Camera selection ───────────────────────────────────────────────────────
+     furthest_camera_prob: float = 0.0
+     """Probability of selecting the ZED2 camera furthest from the pickup object.
+diff --git a/MolmoBot/olmo/data/synthmanip_dataset.py b/MolmoBot/olmo/data/synthmanip_dataset.py
+index fb36b6a..5198016 100644
+--- a/MolmoBot/olmo/data/synthmanip_dataset.py
++++ b/MolmoBot/olmo/data/synthmanip_dataset.py
+@@ -246,6 +246,18 @@ class SynthmanipDataset(Dataset):
+         """Return the effective camera list for this sample (ZED selection applied)."""
+         effective = list(self.camera_names)
+ 
++        # Phase-2 addition: per-example random 2-of-N for 5-cam scenarios.
++        # If candidates are set, replace the corresponding slot with a uniform
++        # random pick. Slot 0 = exo, slot 1 = wrist by convention.
++        exo_cands = self.config.exo_camera_candidates
++        wrist_cands = self.config.wrist_camera_candidates
++        if exo_cands and len(effective) >= 1:
++            effective[0] = str(rng.choice(list(exo_cands)))
++        if wrist_cands and len(effective) >= 2:
++            effective[1] = str(rng.choice(list(wrist_cands)))
++        if exo_cands or wrist_cands:
++            return effective
++
+         if self.config.max_exo_views == 2:
+             effective = ZED2_CAMERAS[:]
+             for cam in self.camera_names:
+@@ -452,6 +464,10 @@ class SynthmanipDataset(Dataset):
+                 "traj_idx": traj_idx,
+                 "split": self.config.split,
+                 "repo_id": repo_id,
++                # Phase-2: record the exact cameras that were used for this
++                # example so downstream components (e.g. SynthmanipTracksDataset)
++                # know which NPZ to load for the per-example "exo" choice.
++                "effective_cameras": list(effective_cameras),
+             },
+         }
+ 
+@@ -989,7 +1005,21 @@ def build_synthmanip_dataset(
+ 
+     config = replace(registered_config, split=split)
+     if kwargs:
+-        config = SynthmanipDatasetConfig(**{**asdict(config), **kwargs})
++        cls = type(config)        # preserve subclass (e.g. DroidDatasetConfig)
++        config = cls(**{**asdict(config), **kwargs})
+ 
+     log.info(f"Building SynthManip dataset '{dataset_name}' split='{split}'")
++    # DROID variant: registered as a DroidDatasetConfig. Imported lazily so
++    # MolmoSpaces-only training paths don't pay the import cost.
++    try:
++        from olmo.data.droid_dataset import DroidDatasetConfig, DroidDataset
++        if isinstance(config, DroidDatasetConfig):
++            return DroidDataset(config)
++    except ImportError:
++        pass
++    if getattr(config, "load_3d_tracks", False):
++        # Phase-2: joint LLM-CE + ActionExpert-MSE training. Imported here to
++        # avoid forcing every SynthManip user to pay the import cost.
++        from olmo.data.synthmanip_tracks_dataset import SynthmanipTracksDataset
++        return SynthmanipTracksDataset(config)
+     return SynthmanipDataset(config)
+diff --git a/MolmoBot/olmo/eval/configure_molmo_spaces.py b/MolmoBot/olmo/eval/configure_molmo_spaces.py
+index b52c9fc..a370e65 100644
+--- a/MolmoBot/olmo/eval/configure_molmo_spaces.py
++++ b/MolmoBot/olmo/eval/configure_molmo_spaces.py
+@@ -58,6 +58,19 @@ class SynthVLAPolicy(InferencePolicy, StatefulPolicy):
+         self.input_window_size = getattr(self.agent.model_config , "n_obs_steps", 1)
+         self.obs_step_delta = getattr(self.agent.model_config , "obs_step_delta", 8)
+ 
++        # Phase-2 joint-mode eval — reproduce the training prompt at inference
++        # by synthesizing a ``<tracks>`` history block from per-frame pickup-obj
++        # poses (ObjectPoseSensor). Only active when training set this flag.
++        self._emit_real_history: bool = bool(getattr(
++            self.agent.model_config, "eval_emit_real_history_tracks", False))
++        self._eval_P: int = int(getattr(self.agent.model_config, "eval_prompt_num_points", 8))
++        self._eval_F: int = int(getattr(self.agent.model_config, "eval_prompt_num_future_frames", 8))
++        self._eval_H: int = int(getattr(self.agent.model_config, "eval_prompt_history_size", 3))
++        self._eval_HS: int = int(getattr(self.agent.model_config, "eval_prompt_history_stride", 1))
++        # Per-episode lazy state for history-track synthesis
++        self._pickup_local_points: np.ndarray | None = None  # (P, 3) in object-local frame
++        self._pickup_obj_name: str | None = None
++
+     def get_state(self):
+         return SynthVLAPolicyState(
+             action_buffer=self.action_buffer,
+@@ -89,6 +102,9 @@ class SynthVLAPolicy(InferencePolicy, StatefulPolicy):
+         self.buffer_index = 0
+         self.step_count = 0
+         self.obs_history = []
++        # Fresh per-episode sampling of object-local track points.
++        self._pickup_local_points = None
++        self._pickup_obj_name = None
+ 
+     def _populate_action_buffer(self, observation) -> None:
+         """Call agent to get new action chunk and populate the buffer."""
+@@ -147,6 +163,12 @@ class SynthVLAPolicy(InferencePolicy, StatefulPolicy):
+         else:
+             goal = self.task.get_task_description()
+ 
++        # Phase-2 joint-mode: wrap the bare task description into the full
++        # default-style trajectory-3D prompt the model was trained on, with
++        # real history tracks synthesized from the object-pose buffer.
++        if self._emit_real_history:
++            goal = self._build_joint_mode_prompt(obs, goal)
++
+         # Call agent
+         pred_actions = self.agent.get_action_chunk(
+             images=images,
+@@ -174,6 +196,224 @@ class SynthVLAPolicy(InferencePolicy, StatefulPolicy):
+         self.buffer_index = 0
+         # logger.info(f"Populated action buffer with {len(self.action_buffer)} actions")
+ 
++    # ── Phase-2 joint-mode eval: build full default-style prompt with real tracks ──
++
++    def _resolve_pickup_obj_name(self, obs: dict) -> str:
++        """Identify which key of ``obs['object_poses']`` is the pickup object.
++
++        Priority: task.config.task_config.pickup_obj_name → first key in obs.
++        """
++        if self._pickup_obj_name is not None:
++            return self._pickup_obj_name
++        name = None
++        try:
++            name = self.task.config.task_config.pickup_obj_name
++        except AttributeError:
++            pass
++        if not name or name not in obs.get("object_poses", {}):
++            # Fallback: use the first key in object_poses (deterministic via sort
++            # in ObjectPoseSensor).
++            names = list(obs.get("object_poses", {}).keys())
++            if not names:
++                raise RuntimeError(
++                    "SynthVLAPolicy: obs['object_poses'] is empty but "
++                    "eval_emit_real_history_tracks=True. Ensure ObjectPoseSensor "
++                    "is registered for this eval config."
++                )
++            name = names[0]
++        self._pickup_obj_name = name
++        return name
++
++    @staticmethod
++    def _robot_base_7d_to_4x4(pose7d: np.ndarray) -> np.ndarray:
++        """Convert a 7D pose (x,y,z, qw,qx,qy,qz) to a 4x4 homogeneous matrix."""
++        from scipy.spatial.transform import Rotation as R
++        p = np.asarray(pose7d, dtype=np.float32).ravel()
++        q_xyzw = np.array([p[4], p[5], p[6], p[3]], dtype=np.float32)
++        T = np.eye(4, dtype=np.float32)
++        T[:3, :3] = R.from_quat(q_xyzw).as_matrix()
++        T[:3, 3] = p[:3]
++        return T
++
++    @classmethod
++    def _obj_pose_world(cls, obs: dict, obj_name: str) -> np.ndarray:
++        """Return the 4x4 pose matrix of ``obj_name`` in WORLD frame.
++
++        ObjectPoseSensor stores the pose relative to robot base (sensors.py:168:
++        ``inv(base.pose) @ obj.pose``). Training-time track coordinates live in
++        a WORLD-axis-aligned frame (verified empirically: per-camera NPZs are
++        identical), so we must undo the robot-base transform at eval to match
++        the training distribution.
++        """
++        pose_rel = np.asarray(obs["object_poses"][obj_name], dtype=np.float32)
++        base = obs.get("robot_base_pose")
++        if base is None:
++            # Fallback: if the sensor isn't registered, assume identity (base
++            # at world origin with no rotation). Only safe for envs where that's
++            # actually true — log a warning so training-eval drift is visible.
++            import logging as _log
++            _log.getLogger(__name__).warning(
++                "robot_base_pose missing from obs — assuming identity; "
++                "tracks will be in robot-base frame, which is rotated vs. "
++                "world and will not match training distribution."
++            )
++            return pose_rel
++        T_base = cls._robot_base_7d_to_4x4(np.asarray(base))
++        return T_base @ pose_rel
++
++    def _build_joint_mode_prompt(self, obs: dict, caption: str) -> str:
++        """Construct the full default-style trajectory-3D prompt with real tracks.
++
++        Mirrors the training-time prompt format from
++        ``SynthmanipTracksDataset.get`` (``prompt_style='default'``, non-encoder
++        mode). Track coordinates are *deltas* (mm) from the anchor frame (last
++        history frame = current). Scale matches training because deltas are
++        frame-invariant up to rotation.
++        """
++        P, H, HS, F = self._eval_P, self._eval_H, self._eval_HS, self._eval_F
++        pickup_name = self._resolve_pickup_obj_name(obs)
++
++        # Lazy init per-episode: P points in the pickup body's LOCAL frame.
++        # Two modes:
++        #   (default) ``use_mesh_surface_points=True`` → sample surface points
++        #     from the pickup body's MuJoCo geoms (boxes/meshes/…). This gives
++        #     the prompt the real object shape that training's NPZ tracks were
++        #     built from.
++        #   (legacy) random ±5cm cube — uniform samples inside a bbox proxy.
++        if self._pickup_local_points is None:
++            rng = np.random.default_rng(0)
++            use_mesh = bool(getattr(
++                self.config.policy_config, "use_mesh_surface_points", True))
++            if use_mesh:
++                try:
++                    from olmo.eval.mesh_surface_sampler import (
++                        sample_body_surface_points_local, find_body_id,
++                    )
++                    mj_model = self.task.env.mj_model
++                    mj_data = self.task.env._mj_datas[0]
++                    body_id = find_body_id(mj_model, pickup_name)
++                    self._pickup_local_points = sample_body_surface_points_local(
++                        mj_model, mj_data, body_id, num_points=P, rng=rng,
++                    )
++                    logger.info(
++                        f"[SynthVLA] sampled {P} surface points on body "
++                        f"'{mj_model.body(body_id).name}' "
++                        f"(local-frame bbox "
++                        f"min={self._pickup_local_points.min(0).tolist()}, "
++                        f"max={self._pickup_local_points.max(0).tolist()})"
++                    )
++                except Exception as exc:
++                    logger.warning(
++                        f"[SynthVLA] mesh-surface sampling failed ({exc!r}); "
++                        f"falling back to ±5cm cube."
++                    )
++                    self._pickup_local_points = rng.uniform(
++                        -0.05, 0.05, size=(P, 3)).astype(np.float32)
++            else:
++                self._pickup_local_points = rng.uniform(
++                    -0.05, 0.05, size=(P, 3)).astype(np.float32)
++        pts_local_h = np.concatenate(
++            [self._pickup_local_points, np.ones((P, 1), dtype=np.float32)], axis=1
++        )  # (P, 4)
++
++        # Collect pose at each history frame index from obs_history, expressed
++        # in WORLD frame (matches training). inference_model appends the current
++        # obs to obs_history before calling us, so obs_history[-1] IS "now".
++        current_idx = len(self.obs_history) - 1
++        hist_indices = [max(0, current_idx - (H - 1 - i) * HS) for i in range(H)]
++        poses = [self._obj_pose_world(self.obs_history[i], pickup_name) for i in hist_indices]
++
++        # Transform the P local points into per-frame world-parallel coords.
++        hist_world = np.stack([(pose @ pts_local_h.T).T[:, :3] for pose in poses])  # (H, P, 3)
++
++        # Training & molmo2 pretrain emit deltas in the EXO-CAMERA FRAME (NPZ's
++        # points_3d are in that frame). Our obs_history also carries the exo
++        # camera's extrinsic_cv per tick — apply the world→cam rotation+translation
++        # at each history frame so the emitted deltas' axis conventions match
++        # what the model learned. Without this, "lift up in world" produces
++        # +Z delta at eval but -Z in training (opposite sign → distribution shift).
++        cam_exts = [self._exo_extrinsic_cv(self.obs_history[i]) for i in hist_indices]
++        hist_cam = []
++        for h, ext in enumerate(cam_exts):
++            R = ext[:, :3]   # (3, 3)
++            t = ext[:, 3]    # (3,)
++            pts_cam = (R @ hist_world[h].T).T + t[None, :]   # (P, 3)
++            hist_cam.append(pts_cam)
++        hist_cam = np.stack(hist_cam)                          # (H, P, 3)
++
++        # Option B — prediction feedback: replace history frames 0..H-2 with
++        # the model's prior predictions (at the matching time offsets). Only
++        # possible starting from the 2nd Job B query (after one prior
++        # prediction has been decoded). Anchor (last hist frame) stays from
++        # sensor — matches the fact that training anchor is always observed.
++        #
++        # Alignment for HS=FS=2, execute_horizon=8:
++        #   prev anchor  N_prev,  predictions at  (N_prev + 2j) for j=1..F
++        #   new anchor   N = N_prev + 8
++        #   new history  (N-4, N-2, N) = (N_prev+4, N_prev+6, N_prev+8)
++        #   → predicted indices j=1 (N_prev+4) and j=2 (N_prev+6) feed new
++        #     history frames 0 and 1; frame 2 (anchor) uses sensor.
++        if (self._use_pred_feedback and
++                self._last_predicted_delta_mm is not None and
++                self._last_pred_anchor_cam_pt is not None and H >= 2):
++            # Recover absolute cam-frame positions of prior predictions.
++            prev_anchor = self._last_pred_anchor_cam_pt                      # (3,)
++            prev_pred_abs = (
++                self._last_predicted_delta_mm.astype(np.float32) / 1000.0
++                + prev_anchor[None, None, :]
++            )                                                                # (F, P, 3)
++            # Map: history frame h needs time (N_prev + FS * (j+1)) where
++            #   N_prev + FS*(j+1) == N - HS*(H-1-h), so
++            #   j = (N - N_prev - HS*(H-1-h)) // FS - 1
++            #   with HS=FS=2 and N-N_prev = execute_horizon (8) this simplifies to:
++            #   j = (execute_horizon / FS) - (H-1-h) - 1 = 3 - (H-1-h)
++            exec_h = self.execute_horizon
++            FS = 2  # matches the training's future_stride in our submit script
++            for h in range(H - 1):   # only non-anchor frames
++                j = (exec_h // FS) - (H - 1 - h) - 1
++                if 0 <= j < prev_pred_abs.shape[0]:
++                    hist_cam[h] = prev_pred_abs[j]
++            # hist_cam[-1] (anchor) keeps sensor value.
++
++        # Anchor convention MUST match training + molmo2 pretrain:
++        #   anchor = point_0 at the LAST history frame (a single 3-vector).
++        # All deltas are then `point_p_at_frame_f − point_0_at_anchor_frame`.
++        # Point 0 itself has delta=0 at anchor frame; points 1..P-1 encode the
++        # object's shape (relative to point 0) AND motion over time.
++        # REF: molmo2/olmo/data/trajectory_3d_dataset.py:986 and
++        #      synthmanip_tracks_dataset.py:324 → `anchor = hist_pts[0, -1]`.
++        anchor_point = hist_cam[-1, 0, :]                     # (3,) — in cam frame
++        hist_delta = hist_cam - anchor_point[None, None, :]   # (H, P, 3)
++        hist_delta_mm = np.round(hist_delta * 1000.0).astype(np.int32)
++
++        # Stash the current anchor so next query's feedback-mode history can
++        # recover absolute positions of the predictions we'll decode below.
++        if self._use_pred_feedback:
++            self._current_query_anchor_cam_pt = anchor_point.copy()
++            self._current_query_prompt = None  # will set below
++
++        # Text format must match molmo2/olmo/data/trajectory_3d_dataset.py::_format_tracks_text.
++        # Visibility: at eval we don't have occlusion info; treat all points as visible.
++        frame_parts = []
++        for fi in range(H):
++            ts = f"{float(fi):.1f}"
++            parts = [ts]
++            for pi in range(P):
++                dx, dy, dz = hist_delta_mm[fi, pi]
++                parts.append(f"{pi + 1} {int(dx)} {int(dy)} {int(dz)}")
++            frame_parts.append(" ".join(parts))
++        coords_str = ";".join(frame_parts)
++        input_tracks = f'<tracks coords="{coords_str}">3d object history</tracks>'
++
++        # Default-style header matches SynthmanipTracksDataset.get().
++        # n_actual_future is static at eval (we don't know clip length); F is
++        # what the model was told to expect.
++        return (
++            f'Predict the future 3D point coordinates of {P} points over '
++            f'{F} timestamps, given action: "{caption}", '
++            f'and history 3d point coordinates: "{input_tracks}".'
++        )
++
+     def obs_to_model_input(self, obs) -> dict[str, np.ndarray]:
+         return obs
+ 
+@@ -252,6 +492,11 @@ class SynthVLAPolicyConfig(BasePolicyConfig):
+     states_mode:str = "cross_attn"
+     relative_max_joint_delta: list[float] | None = [0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2]
+ 
++    # Phase-2 joint-mode eval: sample the P prompt points from the pickup
++    # body's MuJoCo surface (closer to training NPZs than the ±5cm cube).
++    # True by default; set to False to restore the legacy bbox proxy.
++    use_mesh_surface_points: bool = True
++
+     def model_post_init(self, __context) -> None:
+         """Set policy_cls after initialization to avoid circular imports."""
+         if self.policy_cls is None:
+@@ -260,6 +505,180 @@ class SynthVLAPolicyConfig(BasePolicyConfig):
+             object.__setattr__(self, "policy_cls", SynthVLAPolicy)
+ 
+ 
++# ─────────────────────────────────────────────────────────────────────────────
++# Hybrid policy: scripted PickAndPlacePlannerPolicy drives phases 1–4 + first
++# (switchover_tick − 1) MolmoBot-tick-width of phase 5 (so `obs_history`
++# accumulates real object motion). MolmoBot takes over at tick `switchover_tick`,
++# at which point its prompt includes a real non-zero history-3D-track block.
++# ─────────────────────────────────────────────────────────────────────────────
++from molmo_spaces.configs.policy_configs import PickAndPlacePlannerPolicyConfig  # noqa: E402
++
++
++class HybridPickAndPlacePolicyConfig(SynthVLAPolicyConfig):
++    """Extension of SynthVLAPolicyConfig that also holds a scripted planner
++    sub-config. The scripted planner drives the first phases until MolmoBot
++    takes over at `switchover_tick`."""
++
++    # Scripted planner config — same class data-gen uses.
++    scripted_config: PickAndPlacePlannerPolicyConfig = PickAndPlacePlannerPolicyConfig()
++    # MolmoBot kicks off on the Nth execute-horizon refresh after phase 5 starts.
++    # 2 = skip the first tick (zero-delta history), use MolmoBot from the 2nd.
++    switchover_tick: int = 2
++
++    def model_post_init(self, __context) -> None:
++        """Use HybridPickAndPlacePolicy as the policy class."""
++        # Only override policy_cls if still unset (don't trigger parent's default)
++        if self.policy_cls is None:
++            from olmo.eval.configure_molmo_spaces import HybridPickAndPlacePolicy
++            object.__setattr__(self, "policy_cls", HybridPickAndPlacePolicy)
++
++
++class HybridPickAndPlacePolicy(SynthVLAPolicy):
++    """SynthVLAPolicy with a scripted-planner warm-up phase.
++
++    Route at each sim tick:
++      - If scripted's current phase < 5 (pregrasp / grasp / gripper-close):
++        scripted drives. obs_history still accumulates.
++      - If phase ≥ 5 AND molmobot-eligible-tick-count < switchover_tick:
++        scripted drives for this execute-horizon window.
++      - Else: MolmoBot drives.
++
++    Rationale: at eval start the model is given zero-delta history (obs_history
++    has <3 entries). Handing off 1 tick into phase 5 means MolmoBot's first
++    inference receives 8 sim-steps of real lift motion encoded in its
++    3-history-frame track block.
++    """
++
++    @staticmethod
++    def add_auxiliary_objects(config, spec) -> None:
++        """Delegate to the scripted sub-policy's aux injector (which adds the
++        ``grasp_collision_*`` bodies + friends into the MuJoCo ``MjSpec`` at
++        env-setup time). The JSON-benchmark task sampler doesn't call policy
++        aux injectors by default — we monkey-patch it below to do so.
++        """
++        import copy
++        scripted_cls = config.policy_config.scripted_config.policy_cls
++        if scripted_cls is None or not hasattr(scripted_cls, "add_auxiliary_objects"):
++            return
++        scripted_cfg = copy.copy(config)
++        scripted_cfg.policy_config = config.policy_config.scripted_config
++        scripted_cls.add_auxiliary_objects(scripted_cfg, spec)
++
++    def __init__(self, config, task_type):
++        super().__init__(config, task_type)
++        self._scripted = None
++        self._scripted_exp_config = None
++        self._switchover_tick = int(
++            getattr(self.config.policy_config, "switchover_tick", 2)
++        )
++        self._phase5_first_step = None   # sim step at which phase 5 was first seen
++        self._molmobot_active = False
++
++    def reset(self):
++        super().reset()
++        self._phase5_first_step = None
++        self._molmobot_active = False
++        if self._scripted is not None:
++            # Scripted needs re-init per episode (its trajectory is task-specific).
++            try:
++                self._scripted.reset()
++            except Exception as e:
++                logger.warning(f"HybridPickAndPlacePolicy: scripted.reset failed: {e}")
++
++    def _ensure_scripted(self):
++        if self._scripted is not None:
++            return
++        import copy
++        # Build a shallow-copied exp config whose policy_config is the scripted
++        # one AND whose task_config comes from the active JSON-benchmark episode
++        # (the scripted planner's `_compute_target_poses` asserts
++        # `isinstance(config.task_config, PickAndPlaceTaskConfig)`).
++        self._scripted_exp_config = copy.copy(self.config)
++        self._scripted_exp_config.policy_config = self.config.policy_config.scripted_config
++        if self.task is None:
++            raise RuntimeError(
++                "HybridPickAndPlacePolicy: self.task not set yet. "
++                "Hybrid init is deferred until inference_model — is eval framework not attaching the task?"
++            )
++        # Forward per-episode task_config from the task onto the scripted's exp config.
++        task_cfg = getattr(self.task, "config", None)
++        if task_cfg is not None and hasattr(task_cfg, "task_config"):
++            self._scripted_exp_config.task_config = task_cfg.task_config
++        scripted_cls = self.config.policy_config.scripted_config.policy_cls
++        if scripted_cls is None:
++            raise RuntimeError(
++                "HybridPickAndPlacePolicy: scripted_config.policy_cls is None. "
++                "Ensure PickAndPlacePlannerPolicyConfig.model_post_init has set it."
++            )
++        self._scripted = scripted_cls(self._scripted_exp_config, self.task)
++        self._scripted.reset()
++
++    def _current_phase_number(self) -> int:
++        """Return integer phase (1=gripper-open, 2=pregrasp, 3=grasp, 4=gripper-close,
++        5=lift, 6=preplace, 7=place, 8=retreat, 9=go_home). 0 = unknown."""
++        self._ensure_scripted()
++        phase_map = self._scripted.get_all_phases()
++        return int(phase_map.get(self._scripted.get_phase(), 0))
++
++    def inference_model(self, model_input) -> dict[str, np.ndarray]:
++        """Override: route actions between scripted planner and MolmoBot."""
++        obs = model_input[0] if isinstance(model_input, list) else model_input
++        self.obs_history.append(obs)
++
++        self._ensure_scripted()
++        phase_num = self._current_phase_number()
++
++        # Track when phase 5 starts
++        if phase_num >= 5 and self._phase5_first_step is None:
++            self._phase5_first_step = self.step_count
++
++        # Decide: are we "past the warm-up" and should MolmoBot drive?
++        if phase_num >= 5 and not self._molmobot_active:
++            steps_in_phase5 = self.step_count - self._phase5_first_step
++            # Tick count: 0 for first exec-horizon, 1 for second, etc.
++            tick_count = steps_in_phase5 // self.execute_horizon
++            # switchover_tick=2 means MolmoBot takes over starting from tick index 1
++            # (i.e., the 2nd execute-horizon window after phase 5 starts).
++            if tick_count >= self._switchover_tick - 1:
++                self._molmobot_active = True
++                # Flush any leftover buffer so MolmoBot starts a fresh inference.
++                self.action_buffer = []
++                self.buffer_index = 0
++                logger.info(
++                    f"[HybridPolicy] Switching to MolmoBot at step {self.step_count} "
++                    f"(phase={phase_num}, steps_in_phase5={steps_in_phase5}, tick={tick_count+1})"
++                )
++
++        if self._molmobot_active:
++            # Use the parent's buffer+MolmoBot logic. We already appended to
++            # obs_history above; parent's inference_model would append again,
++            # so call _populate_action_buffer directly and mirror the post-scaling.
++            if self.buffer_index >= self.execute_horizon or not self.action_buffer:
++                self._populate_action_buffer(model_input)
++            action = self.action_buffer[self.buffer_index]
++            self.buffer_index += 1
++            self.step_count += 1
++
++            if self.action_type == "joint_pos_rel":
++                predicted_deltas = action["arm"][:7]
++                rel = np.abs(predicted_deltas) / self.relative_max_joint_delta
++                if np.max(rel) > 1:
++                    action["arm"][:7] = predicted_deltas / np.max(rel)
++            else:
++                predicted_deltas = action["arm"][:7] - obs["robot_state"]["qpos"]["arm"]
++                rel = np.abs(predicted_deltas) / self.relative_max_joint_delta
++                if np.max(rel) > 1:
++                    action["arm"][:7] = obs["robot_state"]["qpos"]["arm"] + predicted_deltas / np.max(rel)
++            return action
++        else:
++            # Scripted drives. Its get_action takes an info dict (unused internally).
++            scripted_action = self._scripted.get_action({})
++            self.step_count += 1
++            # Scripted returns a dict keyed by move-group; already matches our
++            # action_spec keys {"arm", "gripper"}.
++            return scripted_action
++
++
+ class FrankaState8ClampConfig(JsonBenchmarkEvalConfig):
+     policy_config: SynthVLAPolicyConfig = SynthVLAPolicyConfig()
+     robot_config: FrankaRobotConfig = FrankaRobotConfig()
+@@ -363,6 +782,413 @@ class SynthVLAFrankaBenchmarkOriginalEvalConfig(JsonBenchmarkEvalConfig):
+                     self.robot_config.command_mode["gripper"] = "joint_rel_position"
+ 
+ 
++class HybridPickAndPlaceEvalConfig(SynthVLAFrankaBenchmarkOriginalEvalConfig):
++    """Hybrid eval: scripted planner warms up through phases 1-4 + first
++    (switchover_tick − 1) MolmoBot-tick windows of phase 5; MolmoBot drives
++    thereafter. Used for Phase-2 Job B (joint-mode) validation so the model's
++    first inference receives real object-motion history rather than zero-delta
++    conditioning."""
++
++    policy_config: HybridPickAndPlacePolicyConfig = HybridPickAndPlacePolicyConfig(
++        gripper_representation_count=1, clamp_gripper=False
++    )
++
++
++# ─────────────────────────────────────────────────────────────────────────────
++# Pretrained-bootstrapped hybrid: a working pretrained MolmoBot (MolmoBot-DROID)
++# drives approach + grasp + first N ticks of hold; our Phase-2 Job B then takes
++# over with real object-motion history conditioning. Sidesteps the scripted
++# planner/cuRobo integration entirely by using a policy that already works.
++# ─────────────────────────────────────────────────────────────────────────────
++
++
++class PretrainedToOursHybridPolicyConfig(SynthVLAPolicyConfig):
++    """SynthVLAPolicyConfig + a second ckpt path for the pretrained bootstrap
++    policy that drives everything until the object is grasped + held for
++    ``handoff_ticks_after_grasp`` MolmoBot-tick windows."""
++
++    pretrained_checkpoint_path: str = ""
++    handoff_ticks_after_grasp: int = 1
++    # Cameras fed to the pretrained agent. Defaults to the same as the main
++    # agent's camera_names (env-provided exo_camera_1 / wrist_camera for the
++    # Franka pick-and-place benchmark). Override if the pretrained ckpt was
++    # trained on different views.
++    pretrained_camera_names: list[str] | None = None
++    # Phase number (from obs["policy_phase"]) at or above which we count ticks
++    # toward the handoff. 5 = "lift" (object has been grasped and is being
++    # lifted).
++    handoff_phase_threshold: int = 5
++    # Option B: after the first Job-B query, use the model's own prior
++    # <tracks> prediction (autoregressively decoded) as the history for
++    # subsequent queries, simulating deployment without object-pose sensing.
++    # False (default) = option A, use sensor for history every query.
++    use_prediction_feedback_history: bool = False
++
++    def model_post_init(self, __context) -> None:
++        if self.policy_cls is None:
++            from olmo.eval.configure_molmo_spaces import PretrainedToOursHybridPolicy
++            object.__setattr__(self, "policy_cls", PretrainedToOursHybridPolicy)
++
++
++class PretrainedToOursHybridPolicy(SynthVLAPolicy):
++    """Hybrid policy: pretrained MolmoBot drives until object is held; our
++    Phase-2 model takes over handoff_ticks_after_grasp execute-horizon windows
++    after the grasp signal fires."""
++
++    def __init__(self, config, task_type):
++        super().__init__(config, task_type)
++        from olmo.models.molmobot.inference_wrapper import SynthManipMolmoInferenceWrapper
++
++        pretrained_path = config.policy_config.pretrained_checkpoint_path
++        if not pretrained_path:
++            raise RuntimeError(
++                "PretrainedToOursHybridPolicy: pretrained_checkpoint_path is empty."
++            )
++        self.pretrained_agent = SynthManipMolmoInferenceWrapper(
++            checkpoint_path=pretrained_path,
++            states_mode=config.policy_config.states_mode,
++        )
++        self._pretrained_n_obs = int(getattr(
++            self.pretrained_agent.model_config, "n_obs_steps", 1))
++        self._pretrained_obs_step_delta = int(getattr(
++            self.pretrained_agent.model_config, "obs_step_delta", 8))
++        logger.info(
++            f"[PretrainedHybrid] pretrained n_obs={self._pretrained_n_obs} "
++            f"delta={self._pretrained_obs_step_delta} // ours n_obs={self.input_window_size} "
++            f"delta={self.obs_step_delta}"
++        )
++        self._handoff_ticks = int(getattr(
++            config.policy_config, "handoff_ticks_after_grasp", 1))
++        # Cameras for the pretrained (bootstrap) policy. Default = main agent's.
++        pcn = getattr(config.policy_config, "pretrained_camera_names", None)
++        self._pretrained_camera_names = list(pcn) if pcn else list(self.camera_names)
++        self._handoff_phase_threshold = int(getattr(
++            config.policy_config, "handoff_phase_threshold", 5))
++        self._first_handoff_phase_step = None
++        self._use_our_policy = False
++
++        # Option B state: last predicted future tracks (quantized mm, in exo-cam
++        # frame, relative to the anchor at the time the prediction was made).
++        self._use_pred_feedback = bool(getattr(
++            config.policy_config, "use_prediction_feedback_history", False))
++        # (F, P, 3) float32 mm, or None until first prediction decoded.
++        self._last_predicted_delta_mm: np.ndarray | None = None
++        # (3,) abs position of anchor pt0 in cam frame at the time the prediction
++        # was made; needed to re-anchor predictions at the next query.
++        self._last_pred_anchor_cam_pt: np.ndarray | None = None
++        # Tracks the anchor pt0 of the CURRENT query's history, stashed inside
++        # _build_joint_mode_prompt so the post-generation LM decode knows which
++        # anchor to attribute to the predicted deltas.
++        self._current_query_anchor_cam_pt: np.ndarray | None = None
++
++    def reset(self):
++        super().reset()
++        self._first_handoff_phase_step = None
++        self._use_our_policy = False
++        self._last_predicted_delta_mm = None
++        self._last_pred_anchor_cam_pt = None
++        self._current_query_anchor_cam_pt = None
++
++    def _exo_extrinsic_cv(self, obs: dict) -> np.ndarray:
++        """Return the 3x4 world→exo_camera extrinsic matrix at this tick.
++
++        Training's NPZ points_3d are expressed in the exo camera's frame; our
++        eval-time deltas must use the SAME frame to avoid axis-sign mismatches
++        (e.g. lift = -Z cam but +Z world for a downward-looking exo).
++        """
++        params = obs.get("sensor_param_exo_camera_1")
++        if params is None or "extrinsic_cv" not in params:
++            # Fall back to identity (world-frame deltas). Warn loudly.
++            logger.warning(
++                "[PretrainedHybrid] obs has no sensor_param_exo_camera_1/extrinsic_cv; "
++                "emitting deltas in WORLD frame (axis signs will NOT match training). "
++                "Ensure CameraParameterSensor for 'exo_camera_1' is registered on this env."
++            )
++            identity = np.eye(4, dtype=np.float32)[:3]
++            return identity
++        return np.asarray(params["extrinsic_cv"], dtype=np.float32)
++
++    def _reached_handoff_phase(self, obs: dict) -> bool:
++        """Handoff triggers once the pickup object is 'held' by the gripper.
++        Reads ``obs['grasp_state_pickup_obj']['gripper']['held']`` which is
++        populated by the env's GraspStateSensor from actual MuJoCo contact
++        state — independent of any registered scripted planner's phase.
++        (``obs['policy_phase']`` is planner-based and returns -1 for our
++        learned-policy eval, so it's not usable here.)
++        """
++        gs = obs.get("grasp_state_pickup_obj")
++        if isinstance(gs, dict):
++            return bool(gs.get("gripper", {}).get("held", False))
++        return False
++
++    def _build_images_for_agent(
++        self, obs: dict, n_obs: int, obs_step_delta: int,
++        camera_names: list | None = None,
++    ) -> list:
++        cams = camera_names if camera_names is not None else self.camera_names
++        images = []
++        for cam_name in cams:
++            if cam_name == "exo_camera_1":
++                cam_name = "droid_shoulder_light_randomization" if "droid_shoulder_light_randomization" in obs else "exo_camera_1"
++            elif cam_name == "wrist_camera":
++                cam_name = "wrist_camera_zed_mini" if "wrist_camera_zed_mini" in obs else "wrist_camera"
++            if cam_name not in obs:
++                raise KeyError(f"Camera '{cam_name}' not in obs. Available: {list(obs.keys())}")
++            cam_images = []
++            if n_obs == 1:
++                cam_images.append(obs[cam_name])
++            else:
++                cur_len = len(self.obs_history)
++                if cur_len > 0:
++                    cur_step = cur_len - 1
++                    for i in range(n_obs):
++                        idx = cur_step - (n_obs - 1 - i) * obs_step_delta
++                        if 0 <= idx < cur_len:
++                            cam_images.append(self.obs_history[idx][cam_name])
++                assert cam_images, "No frames available in obs_history"
++            images.extend(cam_images)
++        return images
++
++    def _populate_pretrained_buffer(self, obs: dict) -> None:
++        images = self._build_images_for_agent(
++            obs, self._pretrained_n_obs, self._pretrained_obs_step_delta,
++            camera_names=self._pretrained_camera_names,
++        )
++        robot_state = obs["robot_state"]
++        qpos_parts = []
++        for g in self.action_move_group_names:
++            if "gripper" not in g:
++                qpos_parts.append(robot_state["qpos"][g])
++            else:
++                qpos_parts.append(
++                    robot_state["qpos"][g][:self.config.policy_config.gripper_representation_count]
++                )
++        state = np.concatenate(qpos_parts).astype(np.float32)
++        goal = obs["task"] if "task" in obs else self.task.get_task_description()
++
++        pred_actions = self.pretrained_agent.get_action_chunk(
++            images=images, task_description=goal, state=state,
++        )
++
++        self.action_buffer = []
++        for t in range(pred_actions.shape[0]):
++            action = {}
++            start = 0
++            for group_name in self.action_move_group_names:
++                dim = self.action_spec[group_name]
++                sel = pred_actions[t, start:start + dim]
++                if "gripper" in group_name and self.config.policy_config.clamp_gripper:
++                    action[group_name] = np.where(sel > 128, 255, 0).astype(sel.dtype)
++                else:
++                    action[group_name] = pred_actions[t, start:start + dim]
++                start += dim
++            self.action_buffer.append(action)
++        self.buffer_index = 0
++
++    def _populate_action_buffer(self, observation) -> None:
++        """Parent builds + executes the action chunk via ActionExpert. For
++        Option B we additionally run an LM autoregressive decode on the SAME
++        prompt/images/state to capture the model's own predicted future
++        ``<tracks>``; those are stashed so the next query's history comes from
++        predictions (feedback loop) instead of the object-pose sensor."""
++        super()._populate_action_buffer(observation)
++        if not self._use_pred_feedback:
++            return
++
++        obs = observation[0] if isinstance(observation, list) else observation
++
++        # Rebuild the exact images/state/prompt that super() just used. The
++        # prompt rebuild is idempotent: _build_joint_mode_prompt reads the
++        # same _last_predicted_delta_mm / _last_pred_anchor_cam_pt as super()
++        # did, so it returns the same text and re-stashes the same
++        # _current_query_anchor_cam_pt.
++        images = self._build_images_for_agent(
++            obs, self.input_window_size, self.obs_step_delta,
++            camera_names=self.camera_names,
++        )
++        robot_state = obs["robot_state"]
++        qpos_parts = []
++        for g in self.action_move_group_names:
++            if "gripper" not in g:
++                qpos_parts.append(robot_state["qpos"][g])
++            else:
++                qpos_parts.append(
++                    robot_state["qpos"][g][:self.config.policy_config.gripper_representation_count]
++                )
++        state = np.concatenate(qpos_parts).astype(np.float32)
++        goal = obs["task"] if "task" in obs else self.task.get_task_description()
++        if self._emit_real_history:
++            prompt_text = self._build_joint_mode_prompt(obs, goal)
++        else:
++            prompt_text = goal
++
++        delta_mm = self._decode_predicted_tracks(prompt_text, images, state)
++        if delta_mm is None:
++            logger.warning(
++                "[PretrainedHybrid] LM decode returned None; feedback history "
++                "will reuse last successful prediction (may drift)."
++            )
++            return
++        if self._current_query_anchor_cam_pt is None:
++            logger.warning(
++                "[PretrainedHybrid] _current_query_anchor_cam_pt unset after "
++                "prompt build; skipping feedback-history update."
++            )
++            return
++        self._last_predicted_delta_mm = delta_mm
++        self._last_pred_anchor_cam_pt = self._current_query_anchor_cam_pt.copy()
++        # Small log so we can sanity-check feedback is firing.
++        mags = np.linalg.norm(delta_mm.astype(np.float32).reshape(-1, 3), axis=1)
++        logger.info(
++            f"[PretrainedHybrid][feedback] decoded LM tracks "
++            f"(F={delta_mm.shape[0]},P={delta_mm.shape[1]}) "
++            f"|Δ| mean={mags.mean():.1f}mm max={mags.max():.1f}mm"
++        )
++
++    def _decode_predicted_tracks(self, prompt_text: str, images: list, state: np.ndarray) -> np.ndarray | None:
++        """Run LM autoregressive decode to get Job B's predicted ``<tracks>``
++        answer. Parse it into (F, P, 3) int-mm deltas (in exo-cam frame,
++        relative to the anchor at prediction time).
++
++        Returns None if decode or parse fails."""
++        import re as _re
++        import torch as _torch
++        try:
++            example = {
++                "style": "demo",
++                "question": prompt_text,
++                "image": images if len(images) > 1 else images[0],
++            }
++            if state is not None:
++                example["state"] = state
++            processed = self.agent.preprocessor(example)
++            batch = self.agent.collator([processed])
++            from olmo.torch_util import move_to_device
++            batch = move_to_device(batch, self.agent.device)
++            # MolmoBot.forward now absorbs **extra_kwargs so VideoOlmo.generate
++            # can pass through the image-args superset (num_images,
++            # multimodal_type, num_image_starts) without hitting an unexpected-
++            # kwarg TypeError. No wrapping needed.
++            with _torch.no_grad():
++                with _torch.autocast(device_type="cuda", dtype=_torch.bfloat16):
++                    olmo_gen = self.agent.model.generate(
++                        batch=batch, max_steps=1200, beam_size=1, is_distributed=False,
++                    )
++            ids = olmo_gen.token_ids[0, 0].detach().cpu().numpy()
++            # VideoOlmo exposes ``build_tokenizer`` on the CONFIG, not the model.
++            tokenizer = self.agent.model.config.build_tokenizer()
++            pred_text = tokenizer.decode(ids[ids >= 0].tolist())
++            # Primary pattern: full well-formed <tracks …>3d object trajectories</tracks>.
++            # Second: closed attr but no closing tag.
++            # Last:  unclosed attr (generation was cut off by max_steps) — parse
++            #        whatever complete frames are there.
++            m = _re.search(r'<tracks coords="([^"]*)">3d object trajectories</tracks>', pred_text)
++            if m is None:
++                m = _re.search(r'<tracks coords="([^"]*)"', pred_text)
++            if m is None:
++                m = _re.search(r'<tracks coords="(.*)$', pred_text, _re.DOTALL)
++            if m is None:
++                preview_head = pred_text[:200].replace("\n", " ")
++                preview_tail = pred_text[-200:].replace("\n", " ")
++                logger.warning(
++                    f"[PretrainedHybrid] LM tracks prediction missing or malformed. "
++                    f"len={len(pred_text)} head={preview_head!r} tail={preview_tail!r}"
++                )
++                return None
++            F, P = self._eval_F, self._eval_P
++            out = np.zeros((F, P, 3), dtype=np.float32)
++            for fi, frame_s in enumerate(m.group(1).split(";")[:F]):
++                toks = frame_s.split()
++                i = 1
++                while i + 3 < len(toks):
++                    try:
++                        pidx = int(toks[i]); dx = int(toks[i+1]); dy = int(toks[i+2]); dz = int(toks[i+3])
++                    except ValueError:
++                        break
++                    if 1 <= pidx <= P:
++                        out[fi, pidx - 1] = [dx, dy, dz]
++                    i += 4
++            return out  # int-mm in cam frame, relative to anchor at prediction time
++        except Exception as exc:
++            logger.warning(f"[PretrainedHybrid] LM decode failed: {exc}")
++            return None
++
++    def inference_model(self, model_input) -> dict[str, np.ndarray]:
++        obs = model_input[0] if isinstance(model_input, list) else model_input
++        self.obs_history.append(obs)
++
++        reached = self._reached_handoff_phase(obs)
++        if reached and self._first_handoff_phase_step is None:
++            self._first_handoff_phase_step = self.step_count
++            logger.info(
++                f"[PretrainedHybrid] handoff phase reached (policy_phase>="
++                f"{self._handoff_phase_threshold}) at step {self.step_count}"
++            )
++
++        if (reached and self._first_handoff_phase_step is not None
++                and not self._use_our_policy):
++            steps_since = self.step_count - self._first_handoff_phase_step
++            tick_count = steps_since // self.execute_horizon
++            if tick_count >= self._handoff_ticks:
++                self._use_our_policy = True
++                self.action_buffer = []
++                self.buffer_index = 0
++                logger.info(
++                    f"[PretrainedHybrid] HANDOFF at step {self.step_count} "
++                    f"(steps_since_phase5={steps_since}, tick={tick_count+1})"
++                )
++
++        if self.buffer_index >= self.execute_horizon or not self.action_buffer:
++            if self._use_our_policy:
++                self._populate_action_buffer(model_input)
++            else:
++                self._populate_pretrained_buffer(obs)
++
++        action = self.action_buffer[self.buffer_index]
++        self.buffer_index += 1
++        self.step_count += 1
++
++        if self.action_type == "joint_pos_rel":
++            pd = action["arm"][:7]
++            rel = np.abs(pd) / self.relative_max_joint_delta
++            if np.max(rel) > 1:
++                action["arm"][:7] = pd / np.max(rel)
++        else:
++            pd = action["arm"][:7] - obs["robot_state"]["qpos"]["arm"]
++            rel = np.abs(pd) / self.relative_max_joint_delta
++            if np.max(rel) > 1:
++                action["arm"][:7] = obs["robot_state"]["qpos"]["arm"] + pd / np.max(rel)
++        return action
++
++
++class PretrainedToOursHybridEvalConfig(SynthVLAFrankaBenchmarkOriginalEvalConfig):
++    """End-to-end hybrid eval using MolmoBot-DROID as the bootstrap policy
++    that drives approach+grasp+lift-warmup, then our Phase-2 Job B takes over.
++
++    Option A (default): object-history tracks at each Job-B query are
++    reconstructed from the live object-pose sensor — no prediction feedback."""
++
++    policy_config: PretrainedToOursHybridPolicyConfig = PretrainedToOursHybridPolicyConfig(
++        gripper_representation_count=1, clamp_gripper=False
++    )
++
++
++class PretrainedToOursHybridFeedbackEvalConfig(PretrainedToOursHybridEvalConfig):
++    """Option B variant of the pretrained-to-ours hybrid eval.
++
++    Instead of using the live object-pose sensor for every Job-B query's
++    history, we run an LM autoregressive decode right after the ActionExpert
++    action chunk and use the model's own <tracks> prediction as the history
++    at the next query. This closes the feedback loop (no privileged sensor
++    info at inference) and surfaces drift the same way deployment would."""
++
++    policy_config: PretrainedToOursHybridPolicyConfig = PretrainedToOursHybridPolicyConfig(
++        gripper_representation_count=1,
++        clamp_gripper=False,
++        use_prediction_feedback_history=True,
++    )
++
++
+ # ── RBY1 ─────────────────────────────────────────────────────────────────
+ 
+ 
+@@ -913,3 +1739,42 @@ class MolmoBotRBY1PickPnPEvalConfig(MolmoBotRBY1EvalConfig):
+         super().model_post_init(__context)
+         # Model outputs 1D torso action → use "height" mode (scalar → 6D joint mapping)
+         self.robot_config.command_mode["torso"] = "height"
++
++
++# ─────────────────────────────────────────────────────────────────────────────
++# Monkey-patch: make JsonEvalTaskSampler.add_auxiliary_objects also invoke the
++# active policy's aux-body injector. Upstream JsonEvalTaskSampler only injects
++# episode-spec objects; it does NOT call policy_cls.add_auxiliary_objects, so
++# planner-based policies (e.g. HybridPickAndPlacePolicy, which needs
++# grasp_collision_* bodies) fail at eval time with KeyError. Applied at module
++# load so any config class whose policy_cls defines add_auxiliary_objects gets
++# its bodies attached automatically.
++# ─────────────────────────────────────────────────────────────────────────────
++def _patch_json_eval_task_sampler_aux_injection() -> None:
++    from molmo_spaces.tasks.json_eval_task_sampler import JsonEvalTaskSampler
++
++    if getattr(JsonEvalTaskSampler, "_patched_by_molmobot_hybrid", False):
++        return
++    _orig = JsonEvalTaskSampler.add_auxiliary_objects
++
++    def _patched(self, spec) -> None:
++        _orig(self, spec)
++        policy_cls = getattr(self.config.policy_config, "policy_cls", None)
++        if policy_cls is None:
++            return
++        inject = getattr(policy_cls, "add_auxiliary_objects", None)
++        if inject is None:
++            return
++        try:
++            inject(self.config, spec)
++        except Exception as exc:
++            logger.warning(
++                f"[configure_molmo_spaces] policy aux-body injection failed "
++                f"({policy_cls.__name__}): {exc}"
++            )
++
++    JsonEvalTaskSampler.add_auxiliary_objects = _patched
++    JsonEvalTaskSampler._patched_by_molmobot_hybrid = True
++
++
++_patch_json_eval_task_sampler_aux_injection()
+diff --git a/MolmoBot/olmo/models/molmobot/inference_wrapper.py b/MolmoBot/olmo/models/molmobot/inference_wrapper.py
+index bc540e2..2acfc45 100644
+--- a/MolmoBot/olmo/models/molmobot/inference_wrapper.py
++++ b/MolmoBot/olmo/models/molmobot/inference_wrapper.py
+@@ -293,6 +293,28 @@ class SynthManipMolmoInferenceWrapper:
+         images = self._prepare_images(images)
+         state = self._prepare_state(state)
+ 
++        # Phase-2 prompt wrapper: if the training checkpoint recorded a
++        # trajectory-3D prompt wrapper (prompt_encoder_mode runs set this on
++        # MolmoBotConfig), wrap the benchmark's task_description in the same
++        # prefix the model was trained to consume. Plain MolmoBot ckpts have
++        # eval_prompt_wrapper="none" and are passed through unchanged.
++        wrapper = getattr(self.model_config, "eval_prompt_wrapper", "none")
++        if wrapper and wrapper != "none":
++            P = int(getattr(self.model_config, "eval_prompt_num_points", 16))
++            F = int(getattr(self.model_config, "eval_prompt_num_future_frames", 16))
++            caption = (task_description or "").strip()
++            if wrapper == "v1_match":
++                wrapped = (
++                    f"Predict the future 3D trajectories of {P} points over {F} timestamps, "
++                    f"given action: {caption},"
++                )
++            else:  # "default"
++                wrapped = (
++                    f"Predict the future 3D point coordinates of {P} points over {F} timestamps, "
++                    f"given action: \"{caption}\","
++                )
++            task_description = wrapped
++
+         # Build example dict for preprocessor
+         example = {
+             "style": "demo",
+@@ -321,6 +343,18 @@ class SynthManipMolmoInferenceWrapper:
+         }
+         model_inputs = {k: v for k, v in model_inputs.items() if v is not None}
+ 
++        # video_olmo.forward calls torch.where(attention_mask, ...) and
++        # ~response_mask, which require bool tensors. The collator may emit
++        # them as int64 (depends on torch + collator version), which raises
++        # ``RuntimeError: where expected condition to be a boolean tensor``
++        # on newer PyTorch. Coerce here so the rest of the model can stay
++        # dtype-agnostic.
++        for _bool_key in ("attention_mask", "response_mask"):
++            if _bool_key in model_inputs:
++                _v = model_inputs[_bool_key]
++                if _v.dtype != torch.bool:
++                    model_inputs[_bool_key] = _v.to(dtype=torch.bool)
++
+         # Generate actions
+         with torch.no_grad():
+             if self.use_bfloat16:
+diff --git a/MolmoBot/olmo/models/molmobot/molmobot.py b/MolmoBot/olmo/models/molmobot/molmobot.py
+index 49711da..a7a442f 100644
+--- a/MolmoBot/olmo/models/molmobot/molmobot.py
++++ b/MolmoBot/olmo/models/molmobot/molmobot.py
+@@ -95,6 +95,95 @@ class MolmoBotConfig(VideoOlmoConfig):
+     robot_postprocessor: Optional[RobotProcessorConfig] = None
+     """Optional unnormalization pipeline used to map model outputs back to the original scale."""
+ 
++    text_ce_loss_weight: float = 0.0
++    """Weight on the VLM's language-modeling cross-entropy loss when the
++    example's ``answers`` span is non-empty.
++
++    Default 0.0 preserves legacy behaviour (text loss suppressed as in the
++    published MolmoBot recipe where ``answers=""``). Set to a positive float
++    (we default 1.0 in the Phase-2 merged recipe) to jointly train the LLM
++    to decode the text answer alongside the ActionExpert flow-matching MSE:
++    ``total_loss = action_flow_loss + text_ce_loss_weight * lm_ce_loss``.
++    """
++
++    eval_prompt_wrapper: str = "none"
++    """Controls how ``SynthManipMolmoInferenceWrapper.get_action_chunk`` wraps
++    the benchmark's ``task_description`` string at eval time.
++
++    Values:
++      - ``"none"``      — pass task_description through as-is (legacy MolmoBot
++                          recipe; used by the released ``allenai/MolmoBot-DROID``).
++      - ``"default"``   — wrap into the trajectory-3D prefix in *default* style:
++                          ``"Predict the future 3D point coordinates of {P}
++                          points over {F} timestamps, given action: \"{c}\","``.
++      - ``"v1_match"``  — wrap into the *v1_match* style:
++                          ``"Predict the future 3D trajectories of {P} points
++                          over {F} timestamps, given action: {c},"``.
++
++    Populated automatically by ``launch_scripts/train_molmobot.py::main()``
++    when ``--prompt_encoder_mode`` is passed, so the eval inference path
++    reproduces the exact prompt distribution the model was trained on.
++    """
++
++    eval_prompt_num_points: int = 16
++    """P value baked into the eval-time trajectory-3D prompt wrapper.
++
++    Ignored when ``eval_prompt_wrapper == "none"``. Training pipeline fills
++    this in from the same ``--num_points`` flag the dataset uses, so at eval
++    the LLM sees the same ``"over {P} points"`` slot.
++    """
++
++    eval_prompt_num_future_frames: int = 16
++    """F value baked into the eval-time trajectory-3D prompt wrapper.
++
++    Ignored when ``eval_prompt_wrapper == "none"``. Training pipeline fills
++    this in from ``--num_future_frames`` (the v1_match "{F} timestamps" slot).
++    The default-style prefix uses this value too (static instead of dynamic
++    at eval — there is no "clip length" at inference time to compute
++    ``n_actual_future`` against).
++    """
++
++    eval_prompt_history_size: int = 3
++    """H value for history-3D tracks. Used by SynthVLAPolicy when
++    ``eval_emit_real_history_tracks=True`` to build the history-tracks block
++    at eval time."""
++
++    eval_prompt_history_stride: int = 1
++    """HS sim-step stride for history frames at eval."""
++
++    eval_prompt_future_stride: int = 1
++    """FS sim-step stride — recorded for completeness."""
++
++    eval_emit_real_history_tracks: bool = False
++    """When True, SynthVLAPolicy synthesizes a full default-style prompt that
++    includes ``<tracks>`` history tracks computed on-the-fly from per-frame
++    pickup-object poses (via ObjectPoseSensor). Set by train_molmobot.py for
++    Phase-2 joint-mode training (load_3d_tracks + NOT prompt_encoder_mode) so
++    eval reproduces the training prompt distribution."""
++
++    eval_condition_action_on_generated: bool = False
++    """When True, ``generate_actions`` first runs an LM autoregressive decode
++    on the prompt-only ``input_ids`` to produce the answer tokens (the
++    ``<tracks>...</tracks>`` future trajectory), appends them to ``input_ids``,
++    runs the VLM forward a second time on the full ``[prompt + generated
++    answer]`` sequence, and feeds THOSE layer hidden states to the
++    ActionExpert.
++
++    This closes the train/eval distribution gap for joint-mode (future-traj-
++    supervised) ckpts: at training the ActionExpert cross-attended to layer
++    states over ``[prompt + GT future tracks]`` (teacher-forced), while at
++    eval — with this flag off — it only sees prompt-only encoding. Enable for
++    joint-mode (load_3d_tracks + NOT prompt_encoder_mode + text_ce_loss_weight>0)
++    training runs. Leave False for prompt-encoder-only ckpts (no answer was
++    supervised, no answer should be generated before conditioning).
++    """
++
++    eval_generate_max_steps: int = 1200
++    """Max tokens to decode when ``eval_condition_action_on_generated=True``.
++    Larger = longer future-tracks answers can complete before truncation; also
++    larger = slower per-query. 1200 is safe for P=8, F=8 (observed real
++    answers are ~700 chars ≈ ~400–500 tokens)."""
++
+     def build_model(self, device=None):
+         return MolmoBot(self, device)
+ 
+@@ -175,8 +264,19 @@ class MolmoBot(VideoOlmo):
+         action_is_pad: Optional[torch.Tensor] = None,
+         packed_batch_idx: Optional[torch.Tensor] = None,
+         packed_example_ids: Optional[torch.Tensor] = None,
++        **extra_kwargs,
+     ) -> OLMoOutput:
+-        """Run the base VLM and (optionally) compute the action loss."""
++        """Run the base VLM and (optionally) compute the action loss.
++
++        ``**extra_kwargs`` absorbs any additional multimodal fields
++        (``num_images``, ``multimodal_type``, ``num_image_starts``, …) that
++        ``VideoOlmo.generate``'s beam-search step passes to ``self()`` but
++        that are not explicitly enumerated here. They are forwarded verbatim
++        to the base VLM's forward, which already accepts them via its own
++        ``**kwargs`` absorber. Without this, calling ``model.generate(...)``
++        on a MolmoBot ckpt would raise
++        ``TypeError: unexpected keyword argument 'num_images'``.
++        """
+         if actions is not None:
+             if actions.shape[1] != self.config.action_horizon:
+                 raise ValueError(
+@@ -209,6 +309,7 @@ class MolmoBot(VideoOlmo):
+             use_cache=use_cache,
+             last_logits_only=last_logits_only,
+             append_last_valid_logits=append_last_valid_logits,
++            **extra_kwargs,
+         )
+ 
+         base_output, layer_states = self._run_backbone(
+@@ -279,10 +380,113 @@ class MolmoBot(VideoOlmo):
+         states: Optional[torch.Tensor] = None,
+         num_steps: Optional[int] = None,
+         generator: Optional[torch.Generator] = None,
++        generated_token_ids: Optional[torch.LongTensor] = None,
+     ) -> torch.Tensor:
+-        """Generate an action trajectory via flow-matching integration."""
++        """Generate an action trajectory via flow-matching integration.
++
++        When ``self.config.eval_condition_action_on_generated`` is True, we
++        first run the LM autoregressive decode to produce the answer tokens
++        (the ``<tracks>...</tracks>`` future-trajectory span), append them to
++        ``input_ids`` and ``attention_mask``, and THEN do the layer-hidden-
++        states forward over the combined ``[prompt + generated answer]``
++        sequence. This matches the teacher-forced training-time conditioning
++        (where ActionExpert cross-attended to layer states over
++        ``[prompt + GT answer]``).
++
++        Callers may also pre-generate the answer and pass ``generated_token_ids``
++        directly — useful when the eval pipeline already ran ``self.generate``
++        for its own purposes (e.g. logging the predicted tracks) and wants to
++        avoid double-generating.
++        """
+         if states is None:
+             raise ValueError("States must be provided for action generation")
++
++        # Optionally run LM decode first to produce future-track answer tokens.
++        if (
++            getattr(self.config, "eval_condition_action_on_generated", False)
++            and generated_token_ids is None
++        ):
++            batch_for_gen = {
++                k: v for k, v in dict(
++                    input_ids=input_ids,
++                    attention_mask=attention_mask,
++                    position_ids=position_ids,
++                    response_mask=response_mask,
++                    images=images,
++                    image_masks=image_masks,
++                    token_pooling=token_pooling,
++                    low_res_token_pooling=low_res_token_pooling,
++                ).items()
++                if v is not None
++            }
++            # Env-var override beats ckpt-saved config so the same checkpoint
++            # can be evaluated under different LM-decode budgets (e.g. tighten
++            # when the rollout pipeline is the bottleneck).
++            import os as _os
++            _env_max = _os.environ.get("MOLMOBOT_EVAL_GENERATE_MAX_STEPS")
++            max_steps = (
++                int(_env_max)
++                if _env_max
++                else int(getattr(self.config, "eval_generate_max_steps", 1200))
++            )
++            with torch.inference_mode():
++                olmo_gen = self.generate(
++                    batch=batch_for_gen,
++                    max_steps=max_steps,
++                    beam_size=1,
++                    is_distributed=False,
++                )
++            # (batch, beam=1, gen_len) → (batch, gen_len). Filter -1 padding.
++            generated_token_ids = olmo_gen.token_ids[:, 0, :]
++
++        if generated_token_ids is not None and generated_token_ids.numel() > 0:
++            gen_ids = generated_token_ids.to(input_ids.device, dtype=input_ids.dtype)
++            # Drop per-sequence trailing -1 padding introduced by beam_search.
++            # All sequences in a batch share the same length but may differ in
++            # valid length; rather than per-sequence padding-strip (which
++            # requires unragged-to-ragged handling), we keep the full tensor
++            # and rely on attention_mask to zero out -1 positions.
++            # ``attention_mask`` MUST be bool when it reaches
++            # ``video_olmo.forward`` (which uses ``torch.where(mask, …)``). Build
++            # gen_mask + prompt_mask as bool, and coerce the input mask to bool
++            # before concat so the result is unambiguous.
++            gen_mask = (gen_ids != -1)
++            # Replace -1 with 0 in input_ids so the embedding lookup is safe.
++            gen_ids_safe = torch.where(gen_ids < 0, torch.zeros_like(gen_ids), gen_ids)
++            prompt_len_before_concat = input_ids.shape[-1]
++            input_ids = torch.cat([input_ids, gen_ids_safe], dim=-1)
++            if attention_mask is None:
++                prompt_mask = torch.ones(
++                    (input_ids.shape[0], prompt_len_before_concat),
++                    dtype=torch.bool,
++                    device=input_ids.device,
++                )
++                attention_mask = torch.cat([prompt_mask, gen_mask], dim=-1)
++            else:
++                attention_mask = torch.cat(
++                    [attention_mask.to(dtype=torch.bool), gen_mask], dim=-1
++                )
++            # position_ids, if provided, must be extended contiguously.
++            if position_ids is not None:
++                cur_max = position_ids.max(dim=-1, keepdim=True).values
++                extra = (
++                    torch.arange(gen_ids.shape[-1], device=position_ids.device)
++                    .unsqueeze(0)
++                    .expand(position_ids.shape[0], -1)
++                    + cur_max
++                    + 1
++                )
++                position_ids = torch.cat([position_ids, extra], dim=-1)
++            # response_mask (marks answer positions for bidirectional attention
++            # over image↔answer tokens during training — mirror that layout).
++            # Must also be bool: ``video_olmo.forward`` does ``~response_mask``
++            # which flips bits incorrectly on integer tensors.
++            if response_mask is not None:
++                resp_extra = torch.ones_like(gen_mask)  # already bool
++                response_mask = torch.cat(
++                    [response_mask.to(dtype=torch.bool), resp_extra], dim=-1
++                )
++
+         encoder_attention_mask = self._get_encoder_attention_mask(input_ids, attention_mask)
+         forward_kwargs = dict(
+             input_ids=input_ids,
+diff --git a/MolmoBot/olmo/models/video_olmo/video_preprocessor.py b/MolmoBot/olmo/models/video_olmo/video_preprocessor.py
+index c401ac3..f9476dc 100644
+--- a/MolmoBot/olmo/models/video_olmo/video_preprocessor.py
++++ b/MolmoBot/olmo/models/video_olmo/video_preprocessor.py
+@@ -97,6 +97,15 @@ class MultiModalVideoPreprocessorConfig(VideoLoaderConfig, TextPreprocessorConfi
+             del config["legacy_image_mask"]
+         if "tokenizer" in config:
+             del config["tokenizer"]
++        # Newer molmo2 groups video-loader/sampling fields under a `video:` sub-dict.
++        # MolmoBot holds them at the top level (inherited from VideoLoaderConfig).
++        # Hoist the fields and drop any keys MolmoBot's schema doesn't know about.
++        if "video" in config:
++            video_sub = config.pop("video")
++            _known = set(cls.__dataclass_fields__.keys())
++            for k, v in video_sub.items():
++                if k in _known:
++                    config[k] = v
+         if "image" not in config:
+             # We assume legacy model did not support image inputs in practice even though they
+             # had config options for it
+diff --git a/MolmoBot/olmo/nn/llm.py b/MolmoBot/olmo/nn/llm.py
+index 4244328..0c8e866 100644
+--- a/MolmoBot/olmo/nn/llm.py
++++ b/MolmoBot/olmo/nn/llm.py
+@@ -599,6 +599,14 @@ class LlmConfig(BaseConfig):
+     The model operation regarding positional embeddings changes depending on this variable.
+     """
+ 
++    can_predict_extra_tokens: bool = False
++    """
++    Accepted for schema compatibility with newer molmo2 configs (our modified Molmo2
++    trained under MotionPlanner/molmo2/ sets this field). MolmoBot does not use it —
++    the flag only affects whether the LM head outputs logits for special tokens, which
++    is decided elsewhere in MolmoBot's inference path.
++    """
++
+     tokenizer: TokenizerConfig = field(default_factory=TokenizerConfig)
+     """
+     Tokenizer configuration.
+diff --git a/MolmoBot/olmo/train/trainer.py b/MolmoBot/olmo/train/trainer.py
+index 3042502..696ccbb 100644
+--- a/MolmoBot/olmo/train/trainer.py
++++ b/MolmoBot/olmo/train/trainer.py
+@@ -816,6 +816,17 @@ class Trainer:
+             action_flow_loss = model_out.internal.get("action_flow_loss")
+             loss = action_flow_loss  / len(micro_batches)
+ 
++            # Phase-2 addition: jointly train the LLM head on <tracks> text when
++            # the MolmoBot config sets text_ce_loss_weight > 0 and the batch
++            # carries a non-empty answer span. Silently no-op otherwise so the
++            # legacy empty-answer recipe behaves unchanged.
++            text_ce_loss_weight = float(getattr(self.cfg.model, "text_ce_loss_weight", 0.0) or 0.0)
++            if text_ce_loss_weight > 0 and batch_size_in_tokens.item() > 1.0:
++                text_ce = ce_loss.sum() / batch_size_in_tokens
++                loss = loss + text_ce_loss_weight * text_ce / len(micro_batches)
++                # Tuck the detached scalar into internal so metrics pick it up.
++                model_out.internal["text_ce_loss"] = text_ce.detach()
++
+             # ce_loss = ce_loss.sum() / batch_size_in_tokens
+             #
+             # # Get loss to optimize for.
+diff --git a/MolmoBot/olmo/train_init_utils.py b/MolmoBot/olmo/train_init_utils.py
+index 0c354ff..d7b8b42 100644
+--- a/MolmoBot/olmo/train_init_utils.py
++++ b/MolmoBot/olmo/train_init_utils.py
+@@ -1,6 +1,6 @@
+ import os
+ from pathlib import Path
+-from typing import List, Optional, Union, Dict
++from typing import List, Optional, Union, Dict, Tuple
+ 
+ import numpy as np
+ 
+@@ -8,6 +8,30 @@ from olmo.data.robot_processing import RobotProcessorConfig
+ from olmo.data.synthmanip_dataset import synthmanip_config_registry, SynthmanipDatasetConfig
+ 
+ 
++# Phase-2 5-cam scenarios: each batch example picks ONE exo and ONE wrist camera
++# uniformly at random from these candidate pools. `predict_camera_follows_exo`
++# makes the 3D-track NPZ read switch to match the sampled exo camera.
++FRANKA_5CAM_EXO_CANDIDATES: List[str] = [
++    "droid_shoulder_light_randomization",
++    "randomized_gopro_analogue_1",
++    "randomized_zed2_analogue_1",
++    "randomized_zed2_analogue_2",
++]
++FRANKA_5CAM_WRIST_CANDIDATES: List[str] = ["wrist_camera_zed_mini"]
++
++
++def _camera_candidates_for_path(data_path: str) -> Tuple[Optional[List[str]], Optional[List[str]], bool]:
++    """If data_path is a 5-cam scenario, return (exo_cands, wrist_cands, follows_exo)."""
++    name = os.path.basename(os.path.normpath(data_path))
++    if "5cam" in name:
++        return (
++            list(FRANKA_5CAM_EXO_CANDIDATES),
++            list(FRANKA_5CAM_WRIST_CANDIDATES),
++            True,
++        )
++    return (None, None, False)
++
++
+ def compute_state_action_normalization_stats(
+         data_paths: List[str],
+         camera_names: List[str],
+@@ -169,6 +193,18 @@ def get_synthmanip_training_data(
+     state_spec: Optional[dict] = None,
+     state_indices: Optional[dict] = None,
+     max_exo_views: int = 1,
++    # Phase-2 merged-trajectory options (default False keeps upstream behaviour).
++    load_3d_tracks: bool = False,
++    predict_camera: str = "exo_camera_1",
++    num_points: int = 1,
++    history_size: int = 3,
++    num_future_frames: int = 16,
++    history_stride: int = 1,
++    future_stride: int = 1,
++    sample_phases: Optional[List[int]] = None,
++    prompt_style: str = "default",
++    prompt_encoder_mode: bool = False,
++    dataset_class: str = "synthmanip",
+ ) -> Optional[Dict[str, float]]:
+     """Build training data mixture for SynthManip-format dataset.
+ 
+@@ -187,9 +223,12 @@ def get_synthmanip_training_data(
+     """
+     from olmo.data.data_loader import DatasetWithArgs
+ 
+-    # Validate all data paths first
+-    for data_path in data_paths:
+-        validate_data_path(data_path, require_val=require_val)
++    # DROID variant skips the MolmoSpaces train/val directory layout check —
++    # ``data_paths`` is reinterpreted as a list of paths to droid_index.json
++    # (each path = one DROID training shard registered as a separate dataset).
++    if dataset_class != "droid":
++        for data_path in data_paths:
++            validate_data_path(data_path, require_val=require_val)
+ 
+     weight_config = None
+     if weighted_sampling:
+@@ -216,6 +255,55 @@ def get_synthmanip_training_data(
+     action_mixture = {}
+     for i, data_path in enumerate(data_paths):
+         use_pts = use_point_prompts_per_dataset[i] if use_point_prompts_per_dataset else use_point_prompts
++
++        # DROID branch: build a DroidDatasetConfig (subclass) and skip the
++        # MolmoSpaces 5-cam camera-candidate inference.
++        if dataset_class == "droid":
++            from olmo.data.droid_dataset import DroidDatasetConfig
++            droid_cfg = DroidDatasetConfig(
++                data_path=os.path.abspath(data_path),
++                droid_index_path=os.path.abspath(data_path),
++                camera_names=camera_names,
++                action_move_group_names=action_move_group_names,
++                action_spec=action_spec,
++                action_keys=action_keys,
++                state_spec=state_spec,
++                state_indices=state_indices,
++                action_horizon=action_horizon,
++                input_window_size=input_window_size,
++                obs_step_delta=obs_step_delta,
++                robot_processor_config=robot_processor_config,
++                weighted_sampling=False,                    # uniform within clips
++                weight_config=None,
++                randomize_prompts=False,                    # captions are fixed
++                furthest_camera_prob=0.0,
++                use_point_prompts=False,
++                conditioning_frame=conditioning_frame,
++                cameras_to_warp=cameras_to_warp or [],
++                max_points_in_conditioning_frame=1,
++                max_exo_views=1,
++                load_3d_tracks=False,                       # no <tracks> in DROID training
++                prompt_encoder_mode=prompt_encoder_mode,
++                prompt_style=prompt_style,
++                num_points=num_points,
++                history_size=history_size,
++                num_future_frames=num_future_frames,
++                history_stride=history_stride,
++                future_stride=future_stride,
++                sample_phases=tuple(sample_phases) if sample_phases else (),
++                exo_camera_candidates=(),
++                wrist_camera_candidates=(),
++                predict_camera_follows_exo=False,
++            )
++            dataset_name = f"synthmanip/task_{i}"
++            synthmanip_config_registry.register(dataset_name, droid_cfg)
++            print(f"Registered DROID dataset '{dataset_name}' for index: {data_path}")
++            action_mixture[dataset_name] = (
++                dataset_sample_rates[i] if dataset_sample_rates else 1.0
++            )
++            continue
++
++        exo_cands, wrist_cands, follows_exo = _camera_candidates_for_path(data_path)
+         config = SynthmanipDatasetConfig(
+             data_path=os.path.abspath(data_path),
+             camera_names=camera_names,
+@@ -238,12 +326,29 @@ def get_synthmanip_training_data(
+             cameras_to_warp=cameras_to_warp or [],
+             max_points_in_conditioning_frame=max_points_in_conditioning_frame,
+             max_exo_views=max_exo_views,
++            load_3d_tracks=load_3d_tracks,
++            predict_camera=predict_camera,
++            num_points=num_points,
++            history_size=history_size,
++            num_future_frames=num_future_frames,
++            history_stride=history_stride,
++            future_stride=future_stride,
++            sample_phases=tuple(sample_phases) if sample_phases else (5, 6, 7, 8),
++            prompt_style=prompt_style,
++            prompt_encoder_mode=prompt_encoder_mode,
++            exo_camera_candidates=exo_cands,
++            wrist_camera_candidates=wrist_cands,
++            predict_camera_follows_exo=follows_exo,
+         )
+ 
+         # Register the configuration with a unique name
+         dataset_name = f"synthmanip/task_{i}"
+         synthmanip_config_registry.register(dataset_name, config)
+-        print(f"Registered dataset '{dataset_name}' for: {data_path} (point_prompts={use_pts})")
++        if exo_cands:
++            print(f"Registered dataset '{dataset_name}' for: {data_path} (point_prompts={use_pts}, "
++                  f"5cam-random: exo={exo_cands}, wrist={wrist_cands})")
++        else:
++            print(f"Registered dataset '{dataset_name}' for: {data_path} (point_prompts={use_pts})")
+ 
+         #datasets.append(DatasetWithArgs(dataset_name=dataset_name))
+         action_mixture[dataset_name] =  dataset_sample_rates[i] if dataset_sample_rates else 1.0

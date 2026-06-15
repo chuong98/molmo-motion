@@ -9,11 +9,19 @@ code live upstream.
 
 ## Installation
 
+MolmoBot finetuning here needs trajectory-conditioning extensions
+(`--load_3d_tracks` / `--prompt_encoder_mode` / `--prompt_style`) that are not in
+public MolmoBot. Clone the **pinned** commit and apply the patch shipped in
+[`molmobot_traj/`](molmobot_traj/) — see [molmobot_traj/SETUP.md](molmobot_traj/SETUP.md)
+for the full recipe (env + the torchcodec/FFmpeg note):
+
 ```bash
-git clone https://github.com/allenai/molmobot
-cd molmobot
-pip install -e '.[train,eval]'
-export MOLMOBOT_REPO="$PWD"
+git clone https://github.com/allenai/MolmoBot
+cd MolmoBot && git checkout d0d71e28        # pinned; HEAD will not apply
+git apply /path/to/robotics/molmobot_traj/molmobot_traj_d0d71e28.patch
+cp -r /path/to/robotics/molmobot_traj/new_files/olmo/* MolmoBot/olmo/
+export MOLMOBOT_REPO="$PWD/MolmoBot"
+uv sync --extra train && uv pip install "torchcodec==0.4.*"
 ```
 
 ## Data
@@ -29,6 +37,17 @@ expects:
 ```bash
 python scripts/prepare_training_data.py \
     --src_root /path/to/molmospaces_data \
+    --dst_root /path/to/train_view
+```
+
+The robot trajectories also ship in the **molmo-motion-1m** dataset under
+`molmospaces/robot_trajectories/` (per-house h5; the episode mp4s are the same
+`molmospaces/videos/` shards). To build the training view straight from an
+unpacked release, use `--release_root` instead of `--src_root`:
+
+```bash
+python scripts/prepare_training_data.py \
+    --release_root /path/to/molmomotion-1m/molmospaces \
     --dst_root /path/to/train_view
 ```
 
