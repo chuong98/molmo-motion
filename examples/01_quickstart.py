@@ -36,7 +36,8 @@ from molmo_motion import MolmoMotion, MolmoMotionProcessor
 MODEL_NAME = "allenai/MolmoMotion-4B-H3-F30"   # or "allenai/MolmoMotion-4B-H1-F32"
 
 processor = MolmoMotionProcessor.from_pretrained(MODEL_NAME)
-model = MolmoMotion.from_pretrained(MODEL_NAME, torch_dtype=torch.bfloat16).eval().cuda()
+model = MolmoMotion.from_pretrained(MODEL_NAME)
+model._internal = model._internal.to(torch.bfloat16).cuda()  # 4B params
 H = processor.config.history_size   # 3 for the H3 model; 1 for the H1 model
 
 
@@ -84,9 +85,12 @@ inputs = processor(
     action=action,
     future_horizon=future_horizon,
 )
-inputs = {k: v.cuda() for k, v in inputs.items() if torch.is_tensor(v)}
+# Keep non-tensor entries (e.g. `future_horizon`, `history_size`, `metadata`):
+# they're consumed by `predict_trajectory` and dropping them silently falls
+# back to defaults that mismatch the requested horizon.
+inputs = {k: v.cuda() if torch.is_tensor(v) else v for k, v in inputs.items()}
 
-with torch.inference_mode():
+with torch.inference_mode(), torch.autocast("cuda", dtype=torch.bfloat16):
     out = model.predict_trajectory(**inputs)
 
 

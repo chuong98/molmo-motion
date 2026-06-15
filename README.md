@@ -247,9 +247,9 @@ model._internal = model._internal.to(torch.bfloat16).cuda()  # 4B params
 #       future_horizon        — number of future frames to predict
 EXAMPLE_DIR = "examples/data/quickstart/davis_car_turn"
 history_frames = [
-    Image.open(f"{EXAMPLE_DIR}/frame_t-2.jpg"),
-    Image.open(f"{EXAMPLE_DIR}/frame_t-1.jpg"),
-    Image.open(f"{EXAMPLE_DIR}/frame_t+0.jpg"),
+    Image.open(f"{EXAMPLE_DIR}/frame_t-2.jpg").convert("RGB"),
+    Image.open(f"{EXAMPLE_DIR}/frame_t-1.jpg").convert("RGB"),
+    Image.open(f"{EXAMPLE_DIR}/frame_t+0.jpg").convert("RGB"),
 ]
 points_2d_at_t0   = torch.load(f"{EXAMPLE_DIR}/points_2d_at_t0.pt")
 points_3d_history = torch.load(f"{EXAMPLE_DIR}/points_3d_history.pt")
