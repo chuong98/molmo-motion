@@ -6,8 +6,7 @@ For each clip in train_aria, extracts the RGB stream (214-1), undistorts
 from fisheye to pinhole using camera calibration from the TAR, applies
 rot90(k=3) to get upright orientation, and saves as MP4.
 
-Requires clip_util from the HOT3D SDK (facebookresearch/hot3d) on PYTHONPATH:
-    export PYTHONPATH=/path/to/hot3d-sdk/hot3d/clips:$PYTHONPATH
+Requirements: imageio[ffmpeg], imageio-ffmpeg, opencv-python-headless, numpy
 
 Usage:
     python hot3d/extract_rgbs.py \
@@ -22,6 +21,7 @@ Usage:
 """
 
 import argparse
+import json
 import os
 import tarfile
 import time
@@ -30,24 +30,66 @@ import cv2
 import imageio.v2 as imageio
 import numpy as np
 
-import clip_util
+
+def get_number_of_frames(tar):
+    max_frame_id = -1
+    for x in tar.getnames():
+        if x.endswith(".info.json"):
+            frame_id = int(x.split(".info.json")[0])
+            if frame_id > max_frame_id:
+                max_frame_id = frame_id
+    return max_frame_id + 1
 
 
-def compute_warp_maps(src_camera, dst_camera):
-    """Compute (map_x, map_y) once for reuse with cv2.remap."""
-    W, H = dst_camera.width, dst_camera.height
-    px, py = np.meshgrid(np.arange(W), np.arange(H))
-    dst_win_pts = np.column_stack((px.flatten(), py.flatten()))
-    dst_eye_pts = dst_camera.window_to_eye(dst_win_pts)
-    world_pts = dst_camera.eye_to_world(dst_eye_pts)
-    src_eye_pts = src_camera.world_to_eye(world_pts)
-    src_win_pts = src_camera.eye_to_window(src_eye_pts)
-    mask = src_eye_pts[:, 2] < 0
-    src_win_pts[mask] = -1
-    src_win_pts = src_win_pts.astype(np.float32)
-    map_x = src_win_pts[:, 0].reshape((H, W))
-    map_y = src_win_pts[:, 1].reshape((H, W))
-    return map_x, map_y
+def load_image(tar, frame_key, stream_key, dtype=np.uint8):
+    file = tar.extractfile(f"{frame_key}.image_{stream_key}.jpg")
+    return imageio.imread(file).astype(dtype)
+
+
+def load_fisheye_params(tar, frame_key, stream_id):
+    """Return (projection_params, width, height) for the given stream."""
+    cameras_raw = json.load(tar.extractfile(f"{frame_key}.cameras.json"))
+    cal = cameras_raw[stream_id]["calibration"]
+    return cal["projection_params"], cal["image_width"], cal["image_height"]
+
+
+def _fisheye624_project(params, X, Y, Z):
+    """Project 3D directions using the Kannala-Brandt fisheye model.
+
+    FISHEYE624 uses a single focal length and a 6-term theta polynomial.
+    The tangential/thin-prism terms (params[9:15]) are all <0.001 for the
+    Aria RGB camera and are omitted — error is sub-pixel, imperceptible in video.
+
+    Reference: Kannala & Brandt, IEEE TPAMI 2006.
+    """
+    f, cx, cy = params[0], params[1], params[2]
+    k = params[3:9]
+    r = np.sqrt(X**2 + Y**2)
+    theta = np.arctan2(r, Z)
+    t2 = theta**2
+    theta_d = theta * (1 + k[0]*t2 + k[1]*t2**2 + k[2]*t2**3
+                       + k[3]*t2**4 + k[4]*t2**5 + k[5]*t2**6)
+    with np.errstate(divide='ignore', invalid='ignore'):
+        mx = np.where(r > 1e-9, X / r * theta_d, 0.0)
+        my = np.where(r > 1e-9, Y / r * theta_d, 0.0)
+    return f * mx + cx, f * my + cy
+
+
+def compute_warp_maps(fisheye_params, W, H):
+    """Compute cv2.remap maps to undistort fisheye to pinhole.
+
+    The undistorted pinhole shares f, cx, cy with the fisheye and the same
+    extrinsics, so the warp reduces to: for each output pixel, unproject
+    through pinhole then project through the fisheye model.
+    """
+    f, cx, cy = fisheye_params[0], fisheye_params[1], fisheye_params[2]
+    px, py = np.meshgrid(np.arange(W, dtype=np.float64),
+                         np.arange(H, dtype=np.float64))
+    X = (px - cx) / f
+    Y = (py - cy) / f
+    Z = np.ones_like(X)
+    map_x, map_y = _fisheye624_project(fisheye_params, X, Y, Z)
+    return map_x.astype(np.float32), map_y.astype(np.float32)
 
 
 def extract_rgb(clip_path, output_dir, fps=30):
@@ -61,20 +103,16 @@ def extract_rgb(clip_path, output_dir, fps=30):
     tar = tarfile.open(clip_path, mode="r")
     stream_id = "214-1"
 
-    num_frames = clip_util.get_number_of_frames(tar)
-
-    # Load camera from first frame to compute warp maps
-    cameras, _ = clip_util.load_cameras(tar, f"{0:06d}")
-    camera_model = cameras[stream_id]
-    camera_pinhole = clip_util.convert_to_pinhole_camera(camera_model)
-    warp_map_x, warp_map_y = compute_warp_maps(camera_model, camera_pinhole)
+    num_frames = get_number_of_frames(tar)
+    fisheye_params, W, H = load_fisheye_params(tar, f"{0:06d}", stream_id)
+    warp_map_x, warp_map_y = compute_warp_maps(fisheye_params, W, H)
 
     writer = imageio.get_writer(out_path, fps=fps, codec="libx264",
                                 quality=8, pixelformat="yuv420p")
 
     for frame_id in range(num_frames):
         frame_key = f"{frame_id:06d}"
-        image = clip_util.load_image(tar, frame_key, stream_id)
+        image = load_image(tar, frame_key, stream_id)
         if image.ndim == 2:
             image = np.stack([image] * 3, axis=-1)
         # Undistort fisheye -> pinhole

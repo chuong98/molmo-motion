@@ -5,7 +5,7 @@ Downloads HOT3D train_aria TAR files from the HOT3D dataset.
 Each TAR is one 5-second Aria clip (~150 frames) and is the input to extract_rgbs.py.
 
 Usage:
-    # Download only clips needed for PointMotionBench (1,279 source clips):
+    # Download only clips needed for PointMotionBench (1,272 source clips):
     python hot3d/download_train_aria.py \
         --output   /path/to/train_aria \
         --captions hot3d/hot3d_annotations.json

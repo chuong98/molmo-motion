@@ -39,22 +39,15 @@ the downloaded annotations.
 
 ---
 
-### Step 2 — HOT3D: reproduce videos
+### Step 2 — HOT3D: Download Videos
 
-HOT3D videos should be reproduced from the source data at [bop-benchmark/hot3d](https://huggingface.co/datasets/bop-benchmark/hot3d) (HuggingFace).
+We do not share videos from HOT3D. Users should access the videos from the source dataset at [bop-benchmark/hot3d](https://huggingface.co/datasets/bop-benchmark/hot3d) (HuggingFace).
 
-**Requirements:**
-- Python packages: `imageio[ffmpeg]`, `opencv-python`, `numpy`
-- HOT3D SDK: clone [facebookresearch/hot3d](https://github.com/facebookresearch/hot3d) (required for fisheye undistortion)
-
-```bash
-git clone https://github.com/facebookresearch/hot3d /path/to/hot3d-sdk
-export PYTHONPATH=/path/to/hot3d-sdk/hot3d/clips:$PYTHONPATH
-```
+**Requirements:** `imageio[ffmpeg]`, `imageio-ffmpeg`, `opencv-python-headless`, `numpy`
 
 ```bash
 # 1. download train_aria TARs (~1,516 clips)
-#    to download only the 1,279 clips needed for PointMotionBench, add:
+#    to download only the 1,272 clips needed for PointMotionBench, add:
 #    --captions hot3d/hot3d_annotations.json
 python hot3d/download_train_aria.py --output /path/to/train_aria
 
