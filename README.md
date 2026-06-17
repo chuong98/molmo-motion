@@ -602,6 +602,7 @@ terms on the [Xperience dataset page](https://huggingface.co/datasets/ropedia-ai
 
 # Citation
 
+<!-- BibTeX hidden until the paper is publicly available.
 ```bibtex
 @inproceedings{molmomotion2026,
     title  = {MolmoMotion: Forecasting Point Trajectories in 3D with Language Instruction},
@@ -610,6 +611,10 @@ terms on the [Xperience dataset page](https://huggingface.co/datasets/ropedia-ai
     year   = {2026}
 }
 ```
+-->
+
+A BibTeX entry will be added here once the paper is publicly available. In
+the meantime, please link to the [paper page](https://allenai.org/papers/molmomotion).
 
 # License
 
