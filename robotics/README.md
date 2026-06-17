@@ -21,7 +21,21 @@ cd MolmoBot
 git apply /path/to/robotics/molmobot_traj/trajectory_conditioning.patch
 cp -r /path/to/robotics/molmobot_traj/overlay/olmo/* MolmoBot/olmo/
 export MOLMOBOT_REPO="$PWD/MolmoBot"
-uv sync --extra train && uv pip install "torchcodec==0.4.*"
+
+# Build the environment. `--extra eval` is required: the overlay's
+# `olmo/eval/mesh_surface_sampler.py` imports `mujoco`, which ships in
+# the eval extra (not the train extra).
+uv sync --extra train --extra eval --python 3.11
+
+# torchcodec matches torch 2.7 but is not in the train/eval extras.
+# Use the explicit `--python` form — bare `uv pip install` resolves to
+# the active conda env, not the freshly-created .venv.
+uv pip install --python .venv/bin/python "torchcodec==0.4.*"
+
+# torchcodec runtime needs FFmpeg ≤ 7 shared libs on the loader path.
+# If `.venv/bin/python -c "import torchcodec"` errors with
+# `libavutil.so.NN: cannot open shared object`, install FFmpeg 7:
+conda install -c conda-forge 'ffmpeg=7'
 ```
 
 ## Data

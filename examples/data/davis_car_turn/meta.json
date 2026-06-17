@@ -1,0 +1,30 @@
+{
+  "id": "davis_car_turn",
+  "dataset": "davis_bench",
+  "video": "car-turn",
+  "obj": "silver_car",
+  "t0_absolute": 2,
+  "history_frame_indices": [
+    0,
+    1,
+    2
+  ],
+  "point_indices": [
+    0,
+    2,
+    3,
+    10,
+    11,
+    14,
+    17,
+    19
+  ],
+  "n_points": 8,
+  "history_size": 3,
+  "image_size_wh": [
+    854,
+    480
+  ],
+  "has_intrinsics": true,
+  "caption": "A silver car follows the road and slowly turns to the right"
+}

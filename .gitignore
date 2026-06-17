@@ -36,3 +36,6 @@ dataset_recipes/*
 *.tmp
 .idea/
 .vscode/
+
+# examples output mp4s
+*_2d.mp4

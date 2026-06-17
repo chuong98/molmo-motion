@@ -204,6 +204,11 @@ Below we run a single forward pass on a bundled clip and read the
 `(P, F, 3)` future trajectory. Expected wall-clock on a single 80 GB A100:
 ~110 s for checkpoint load + ~40 s for `predict_trajectory()`.
 
+For the full runnable script — including rendering the prediction as a 2D-track
+MP4 over the `t₀` frame — see [`examples/01_quickstart.py`](examples/01_quickstart.py)
+(`python examples/01_quickstart.py`, or `--from-prediction` to render from a
+bundled prediction with no GPU). Details in [`examples/README.md`](examples/README.md).
+
 ```python
 import torch
 from PIL import Image
@@ -223,7 +228,7 @@ model._internal = model._internal.to(torch.bfloat16).cuda()  # 4B params
 #       points_3d_history     — (H, P, 3) tensor in camera-frame-at-t₀
 #       action                — short action description
 #       future_horizon        — number of future frames to predict
-EXAMPLE_DIR = "examples/data/quickstart/davis_car_turn"
+EXAMPLE_DIR = "examples/data/davis_bmx_trees"
 history_frames = [
     Image.open(f"{EXAMPLE_DIR}/frame_t-2.jpg").convert("RGB"),
     Image.open(f"{EXAMPLE_DIR}/frame_t-1.jpg").convert("RGB"),
@@ -261,6 +266,16 @@ for pi in range(future_3d.shape[0]):
 
 # Point 0's full predicted trajectory across all 30 future frames:
 print(f"point 0 trajectory (F=30): {future_3d[0].round(3).tolist()}")
+
+# 5. Visualize straight from the prediction with `render_trajectory_mp4`
+#    (defined in examples/01_quickstart.py): a 2D track over the t₀ frame.
+render_trajectory_mp4(
+    out.future_3d,
+    t0_image=history_frames[-1],
+    intrinsics=torch.load(f"{EXAMPLE_DIR}/intrinsics_K.pt"),
+    points_2d_at_t0=points_2d_at_t0,
+    output_path="davis_bmx_trees_2d.mp4",
+)
 ```
 
 # Data and benchmark construction
@@ -443,43 +458,49 @@ the same setup as the paper:
 
 ## PointMotionBench benchmark eval
 
+`launch_scripts/eval_pointmotionbench.py` is single-rank — its inner
+`full_rollout` driver does not shard configs across ranks. Run with
+`--nproc-per-node=1` and one inference GPU; one full run is ~9 GPU-hours
+total for both checkpoints across all three subsets at the default
+`--max_points_per_clip 24` recipe.
+
 ```bash
 # H=3, F=30 model
-torchrun --nproc-per-node=8 launch_scripts/eval_pointmotionbench.py \
-    checkpoints/MolmoMotion-H3-F30/step10000 \
+torchrun --nproc-per-node=1 launch_scripts/eval_pointmotionbench.py \
+    checkpoints/MolmoMotion-4B-H3-F30 \
     --benchmarks hot3d,worldtrack,davis \
     --all_points \
     --fixed_t0 \
-    --device_batch_size=2 \
-    --output_dir eval_out/MolmoMotion-H3-F30
+    --history 3 --future 30 \
+    --output_dir eval_out/MolmoMotion-4B-H3-F30
 
 # H=1, F=32 model
-torchrun --nproc-per-node=8 launch_scripts/eval_pointmotionbench.py \
-    checkpoints/MolmoMotion-H1-F32/step10000 \
+torchrun --nproc-per-node=1 launch_scripts/eval_pointmotionbench.py \
+    checkpoints/MolmoMotion-4B-H1-F32 \
     --benchmarks hot3d,worldtrack,davis \
     --all_points \
     --fixed_t0 \
-    --device_batch_size=2 \
-    --output_dir eval_out/MolmoMotion-H1-F32
+    --history 1 --future 32 \
+    --output_dir eval_out/MolmoMotion-4B-H1-F32
 ```
 
 Flag semantics:
 
 | Flag | Meaning |
 |---|---|
-| `--all_points` | Don't sub-sample 8 query points per clip — chunk all annotated points into groups of P=8 and average the metric across chunks. |
+| `--all_points` | Don't sub-sample 8 query points per clip — chunk every visible point into groups of P=8 and average the metric across chunks. |
+| `--max_points_per_clip 24` | Cap the per-clip visible-point pool *before* chunking, so each clip emits at most ⌈24 / P⌉ = 3 records. Matches the paper recipe; pass `0` to chunk every visible point (much slower; drifts from paper numbers). |
 | `--fixed_t0` | Pin the query frame at `t = H − 1` so eval is deterministic across runs. Without this, `t₀` is randomized per clip. |
-| `--n_samples N` | Take the best of N samples per example (paper uses 5). Default 1. |
 
 Output:
 
 ```
-eval_out/MolmoMotion-H3-F30/
+eval_out/MolmoMotion-4B-H3-F30/
 ├── hot3d/
-│   ├── predictions.json        # per-example {gt, pred, video_id, point_idx, ...}
+│   ├── predictions.jsonl       # one JSON record per (video, obj, t0, batch) — gt_future_raw / pred_raw_combined / gt_future_vis / point_indices / caption / …
 │   └── metrics.json            # ADE / FDE / PWT aggregates
-├── worldtrack/...
-├── davis/...
+├── worldtrack/…
+├── davis/…
 └── summary.json                # one-page rollup
 ```
 

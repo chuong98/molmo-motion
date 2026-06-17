@@ -1,0 +1,30 @@
+{
+  "id": "egodex_clean_surface",
+  "dataset": "egodex",
+  "video": "part1_clean_surface_1713",
+  "obj": "object",
+  "t0_absolute": 10,
+  "history_frame_indices": [
+    8,
+    9,
+    10
+  ],
+  "point_indices": [
+    0,
+    3,
+    4,
+    8,
+    18,
+    19,
+    24,
+    25
+  ],
+  "n_points": 8,
+  "history_size": 3,
+  "image_size_wh": [
+    854,
+    480
+  ],
+  "has_intrinsics": true,
+  "caption": "Roll a lint roller on a blue cloth"
+}

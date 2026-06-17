@@ -127,6 +127,15 @@ def main():
                         "into N // num_points contiguous batches; each batch "
                         "is one rollout chain. Per-(entry,t,batch) records "
                         "share the same example_id prefix and resume cleanly.")
+    p.add_argument("--max_points_per_clip", type=int, default=None,
+                   help="When combined with --all_points: if the visible "
+                        "point pool for a clip exceeds this value, randomly "
+                        "sub-sample (per-clip deterministic seed) to this "
+                        "size BEFORE chunking. Caps the per-clip forward-pass "
+                        "count to ceil(max_points_per_clip / num_points). "
+                        "Pass --max_points_per_clip 24 with --num_points 8 "
+                        "for exactly 3 forward passes per clip — the recipe "
+                        "the released paper numbers use.")
     p.add_argument("--fixed_t0", type=int, default=None,
                    help="If set, ignore the (s, s+3, s+6) sampling and use "
                         "this single absolute frame index as t0 for every "
@@ -452,6 +461,17 @@ def main():
                 # Sort and split into N // P contiguous batches; drop remainder
                 # (per user spec). If fewer than P candidates, skip.
                 cand_full = np.sort(cand_full)
+                # Optional cap: random sub-sample to at most
+                # `max_points_per_clip` before chunking. Per-clip
+                # deterministic seed → identical subset on resume / reruns.
+                if (args.max_points_per_clip is not None
+                        and len(cand_full) > args.max_points_per_clip):
+                    clip_rng = np.random.RandomState(
+                        (hash(ex_id_prefix) & 0xFFFFFFFF) ^ args.seed
+                    )
+                    cand_full = np.sort(clip_rng.choice(
+                        cand_full, args.max_points_per_clip, replace=False
+                    ))
                 n_batches = len(cand_full) // P
                 if n_batches == 0:
                     log.warning(f"Only {len(cand_full)} visible points (<P={P}) "

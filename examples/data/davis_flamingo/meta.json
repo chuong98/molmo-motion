@@ -1,0 +1,30 @@
+{
+  "id": "davis_flamingo",
+  "dataset": "davis_bench",
+  "video": "flamingo",
+  "obj": "flamingo",
+  "t0_absolute": 2,
+  "history_frame_indices": [
+    0,
+    1,
+    2
+  ],
+  "point_indices": [
+    2,
+    7,
+    8,
+    11,
+    17,
+    25,
+    30,
+    31
+  ],
+  "n_points": 8,
+  "history_size": 3,
+  "image_size_wh": [
+    854,
+    480
+  ],
+  "has_intrinsics": true,
+  "caption": "A flamingo dips its beak into the water while walking to the right"
+}
