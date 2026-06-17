@@ -8,7 +8,7 @@ A benchmark for evaluating 3D point motion in video, covering egocentric and thi
 |---------|-------|--------------|--------|------------|
 | DAVIS | 90 | mp4, 24 fps | 2D + 3D | Third-person, diverse outdoor/indoor |
 | HOT3D | 2,475 | mp4, 30 fps | 2D + 3D | Egocentric, object manipulation (Aria) |
-| WorldTrack | 155 | npz (frames embedded), 30 fps | 3D (+2D) | Egocentric + studio, 4 splits |
+| WorldTrack | 155 | npz, 30 fps | 3D (+2D) | Egocentric + studio, 4 splits |
 
 ---
 
