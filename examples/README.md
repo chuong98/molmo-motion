@@ -51,7 +51,6 @@ Each clip ships `frame_t{-2,-1,+0}.jpg`, `points_2d_at_t0.pt` `(P,2)`,
 | `davis_flamingo` | ✅ | |
 | `egodex_ball_base` | ✅ | Egocentric. |
 | `egodex_clean_surface` | ✅ | Egocentric. |
-| `molmospaces_pick_place` | — (run the model) | Ships the ground-truth future for an ADE sanity check. |
 
 `predictions_h3.jsonl` is the same per-example JSONL the eval pipeline
 (`src/molmo_motion/eval/full_rollout.py`) writes: each row carries

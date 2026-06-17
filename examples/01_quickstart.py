@@ -201,7 +201,10 @@ def load_example(example_dir: Path, history_size: int):
         for i in range(-(history_size - 1), 1)        # H=3 -> t-2, t-1, t+0
     ]
     points_2d_at_t0 = torch.load(example_dir / "points_2d_at_t0.pt")     # (P, 2)
-    points_3d_history = torch.load(example_dir / "points_3d_history.pt")  # (H, P, 3)
+    # Bundled tensor ships with 3 history frames; slice the last `history_size`
+    # so the H=1 model gets just t_0 (shape (1, P, 3)) and the H=3 model gets
+    # t-2..t_0 (shape (3, P, 3)). Same indexing as `history_frames` above.
+    points_3d_history = torch.load(example_dir / "points_3d_history.pt")[-history_size:]
     intrinsics = torch.load(example_dir / "intrinsics_K.pt")             # (3, 3)
     caption_file = example_dir / "caption.txt"
     action = caption_file.read_text().strip() if caption_file.exists() else meta["action"]

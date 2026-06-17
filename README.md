@@ -7,8 +7,8 @@
   <a href="https://github.com/allenai/molmo-motion/blob/main/LICENSE">
     <img alt="License" src="https://img.shields.io/badge/license-Apache_2.0-blue.svg">
   </a>
-  <a href="https://arxiv.org/abs/TBD">
-    <img alt="arXiv" src="https://img.shields.io/badge/arXiv-TBD-b31b1b.svg">
+  <a href="https://allenai.org/papers/molmomotion">
+    <img alt="Paper" src="https://img.shields.io/badge/paper-Ai2-b31b1b.svg">
   </a>
   <a href="https://allenai.org/blog/molmo-motion">
     <img alt="Blog" src="https://img.shields.io/badge/MolmoMotion-blog-F0529C">
@@ -42,7 +42,7 @@ generation.
 This repository covers the **autoregressive (AR) variant** from the paper,
 together with the [MolmoMotion-1M](https://huggingface.co/datasets/allenai/molmo-motion-1m)
 training corpus and the [PointMotionBench](https://huggingface.co/datasets/allenai/PointMotionBench)
-evaluation suite. See the [paper](https://arxiv.org/abs/TBD) or the
+evaluation suite. See the [paper](https://allenai.org/papers/molmomotion) or the
 [blog post](https://allenai.org/blog/molmo-motion) for the full
 methodology and results.
 
@@ -535,7 +535,7 @@ visibility-masked frames (padded futures for short clips are excluded).
   <br>
   <em>Predicted 3D point trajectories on PointMotionBench across diverse
   motion patterns and language instructions. See Section 4 of the
-  <a href="https://arxiv.org/abs/TBD">paper</a> for the full quantitative
+  <a href="https://allenai.org/papers/molmomotion">paper</a> for the full quantitative
   comparison.</em>
 </div>
 

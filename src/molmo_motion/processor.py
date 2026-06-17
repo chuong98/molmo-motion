@@ -105,9 +105,21 @@ class MolmoMotionProcessor:
             text_seq_len=None,
             max_seq_len=internal_cfg.llm.max_sequence_length,
         )
+        # `history_size` is the number of RGB history frames the preprocessor
+        # expects and the model's `<tracks>` output indexes timestamps from
+        # (`start_timestamp = history_size`). The internal Molmo2 video preprocessor
+        # exposes it as `mm_preprocessor.video.max_frames`. The H=1 release ckpt
+        # has `max_frames=1`; the H=3 ckpt has `max_frames=3`. The legacy fallback
+        # to a custom top-level `history_size` attr (default 3) is kept for
+        # internal checkpoints that predate the move to `video.max_frames`.
+        video_cfg = getattr(getattr(internal_cfg, "mm_preprocessor", None),
+                            "video", None)
+        history_size_from_pre = getattr(video_cfg, "max_frames", None)
+        history_size = history_size_from_pre if history_size_from_pre is not None \
+            else getattr(internal_cfg, "history_size", 3)
         public_cfg = MolmoMotionConfig(
             num_points=getattr(internal_cfg, "num_points", 8),
-            history_size=getattr(internal_cfg, "history_size", 3),
+            history_size=history_size,
             future_size=getattr(internal_cfg, "num_future_frames", 8),
             max_sequence_length=internal_cfg.llm.max_sequence_length,
         )
