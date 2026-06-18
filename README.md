@@ -8,7 +8,7 @@
     <img alt="License" src="https://img.shields.io/badge/license-Apache_2.0-blue.svg">
   </a>
   <a href="https://arxiv.org/abs/2606.18558">
-    <img alt="Paper" src="https://img.shields.io/badge/paper-Ai2-b31b1b.svg">
+    <img alt="arXiv" src="https://img.shields.io/badge/arXiv-2606.18558-b31b1b.svg">
   </a>
   <a href="https://allenai.org/blog/molmo-motion">
     <img alt="Blog" src="https://img.shields.io/badge/MolmoMotion-blog-F0529C">
