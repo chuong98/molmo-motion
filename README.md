@@ -7,7 +7,7 @@
   <a href="https://github.com/allenai/molmo-motion/blob/main/LICENSE">
     <img alt="License" src="https://img.shields.io/badge/license-Apache_2.0-blue.svg">
   </a>
-  <a href="https://allenai.org/papers/molmomotion">
+  <a href="https://arxiv.org/abs/2606.18558">
     <img alt="Paper" src="https://img.shields.io/badge/paper-Ai2-b31b1b.svg">
   </a>
   <a href="https://allenai.org/blog/molmo-motion">
@@ -42,7 +42,7 @@ generation.
 This repository covers the **autoregressive (AR) variant** from the paper,
 together with the [MolmoMotion-1M](https://huggingface.co/datasets/allenai/molmo-motion-1m)
 training corpus and the [PointMotionBench](https://huggingface.co/datasets/allenai/PointMotionBench)
-evaluation suite. See the [paper](https://allenai.org/papers/molmomotion) or the
+evaluation suite. See the [paper](https://arxiv.org/abs/2606.18558) or the
 [blog post](https://allenai.org/blog/molmo-motion) for the full
 methodology and results.
 
@@ -535,7 +535,7 @@ visibility-masked frames (padded futures for short clips are excluded).
   <br>
   <em>Predicted 3D point trajectories on PointMotionBench across diverse
   motion patterns and language instructions. See Section 4 of the
-  <a href="https://allenai.org/papers/molmomotion">paper</a> for the full quantitative
+  <a href="https://arxiv.org/abs/2606.18558">paper</a> for the full quantitative
   comparison.</em>
 </div>
 
@@ -602,19 +602,18 @@ terms on the [Xperience dataset page](https://huggingface.co/datasets/ropedia-ai
 
 # Citation
 
-<!-- BibTeX hidden until the paper is publicly available.
 ```bibtex
-@inproceedings{molmomotion2026,
-    title  = {MolmoMotion: Forecasting Point Trajectories in 3D with Language Instruction},
-    author = {<author list TBD>},
-    booktitle = {<venue TBD>},
-    year   = {2026}
+@article{zhang2026molmomotion,
+    title         = {MolmoMotion: Forecasting Point Trajectories in 3D with Language Instruction},
+    author        = {Zhang, Jianing and Zheng, Chenhao and Yang, Yajun and Argus, Max and Soraki, Rustin and Han, Winson and Anderson, Taira and Li, Chun-Liang and Liu, Shuo and Duan, Jiafei and Ren, Zhongzheng and Zhang, Jieyu and Krishna, Ranjay},
+    journal       = {arXiv preprint arXiv:2606.18558},
+    year          = {2026},
+    archivePrefix = {arXiv},
+    eprint        = {2606.18558},
+    primaryClass  = {cs.CV},
+    url           = {https://arxiv.org/abs/2606.18558},
 }
 ```
--->
-
-A BibTeX entry will be added here once the paper is publicly available. In
-the meantime, please link to the [paper page](https://allenai.org/papers/molmomotion).
 
 # License
 
