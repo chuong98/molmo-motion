@@ -41,8 +41,7 @@ import os
 import re
 
 from molmo_motion.data.dataset import Dataset
-from molmo_motion.data.trajectory_3d_dataset import Trajectory3DDataset
-
+from molmo_motion.data.trajectory import build_from_tokens
 
 # Five human-video datasets used by the public training recipe.
 _HUMAN_DATASETS = ("egodex", "ytvis", "hepic", "xperience", "stereo4d")
@@ -85,16 +84,16 @@ def get_dataset_by_name(dataset_name, split) -> Dataset:
     max_eval = os.environ.get("TRAJ3D_MAX_EVAL_PER_DATASET")
     max_eval = int(max_eval) if max_eval else None
 
-    return Trajectory3DDataset(
-        split=_split,
+    return build_from_tokens(
+        tuple(datasets),
+        _split,
+        dataset_weighting="sqrt",
         num_points=num_points,
         num_future_frames=future,
         history_size=history,
-        datasets=tuple(datasets),
         use_2d_point_features=use_2d,
         use_2d_coordinate=use_2d_coordinate,
         max_eval_per_dataset=max_eval,
-        dataset_weighting="sqrt",
         use_camera_frame=True,
         bspline_n_ctrl=bspline_n_ctrl,
     )
