@@ -64,6 +64,7 @@ class MolmoMotionConfig(PretrainedConfig):
         max_sequence_length: int = 2560,
         max_new_tokens: Optional[int] = None,
         coord_scale: int = 1000,
+        bspline_n_ctrl: int = 0,
         **kwargs,
     ):
         if history_size not in (1, 3):
@@ -83,6 +84,10 @@ class MolmoMotionConfig(PretrainedConfig):
         self.max_sequence_length = max_sequence_length
         self.max_new_tokens = max_new_tokens
         self.coord_scale = coord_scale
+        # 0 = frame-based (default); {4,7,10} = predict D B-spline control points.
+        # When >0, `predict_trajectory` parses D control-point rows and renders
+        # them to the requested `future_horizon` before returning `future_3d`.
+        self.bspline_n_ctrl = bspline_n_ctrl
         super().__init__(**kwargs)
 
     @property

@@ -103,6 +103,7 @@ class MolmoMotion(PreTrainedModel):
             history_size=getattr(internal_cfg, "history_size", 3),
             future_size=getattr(internal_cfg, "num_future_frames", 8),
             max_sequence_length=internal_cfg.llm.max_sequence_length,
+            bspline_n_ctrl=getattr(internal_cfg, "bspline_n_ctrl", 0),
         )
         model = cls(public_cfg, internal_config=internal_cfg)
         load_model_state(pretrained_model_name_or_path, model._internal)
@@ -175,14 +176,25 @@ class MolmoMotion(PreTrainedModel):
             future_3d = torch.zeros((P, future_horizon, 3), dtype=torch.float32)
             return MolmoMotionOutput(future_3d=future_3d, future_text=future_text)
 
-        # First future timestamp is `H` (history occupies frames 0..H-1).
-        H = batch_extras.get("history_size", self.config.history_size)
-        delta, _vis = tracks_to_array(
-            parsed,
-            num_points=self.config.num_points,
-            num_frames=future_horizon,
-            start_timestamp=float(H),
-        )
+        # B-spline mode: the answer is D control-point rows (index 0..D-1);
+        # parse and render them back to `future_horizon` frames. Frame mode:
+        # parse F frame rows directly (first future timestamp is `H`).
+        n_ctrl = getattr(self.config, "bspline_n_ctrl", 0)
+        if n_ctrl:
+            from molmo_motion.data.bspline import render_control_points
+            from molmo_motion.eval.egodex_3d_evaluator import tracks_to_control_points
+
+            ctrl_delta, _ = tracks_to_control_points(
+                parsed, num_points=self.config.num_points, n_ctrl=int(n_ctrl))
+            delta = render_control_points(ctrl_delta, future_horizon).cpu().numpy()
+        else:
+            H = batch_extras.get("history_size", self.config.history_size)
+            delta, _vis = tracks_to_array(
+                parsed,
+                num_points=self.config.num_points,
+                num_frames=future_horizon,
+                start_timestamp=float(H),
+            )
         future_3d = torch.from_numpy(np.asarray(delta, dtype=np.float32))
         # Add the anchor (camera-frame XYZ at t_0) back to recover absolute
         # camera-frame coords. The processor stashes this in `batch_extras`.

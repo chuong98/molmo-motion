@@ -37,6 +37,11 @@ class Molmo2TrajectoryConfig(Molmo2Config):
     use_2d_point_features: bool = False
     point_feat_patch_grid_size: int = 27  # SigLIP2: 378 / 14 = 27
 
+    # B-spline control-point answer mode (opt-in). 0 = frame-based (default);
+    # {4,7,10} = the checkpoint emits D control points per point. Recorded in
+    # config.yaml at train time so inference/eval know how to decode the answer.
+    bspline_n_ctrl: int = 0
+
     _model_name: ClassVar[str] = "video_olmo_trajectory"
 
     def build_model(self, device=None):

@@ -122,6 +122,7 @@ class MolmoMotionProcessor:
             history_size=history_size,
             future_size=getattr(internal_cfg, "num_future_frames", 8),
             max_sequence_length=internal_cfg.llm.max_sequence_length,
+            bspline_n_ctrl=getattr(internal_cfg, "bspline_n_ctrl", 0),
         )
         return cls(
             tokenizer=tokenizer,
@@ -192,11 +193,20 @@ class MolmoMotionProcessor:
         history_tracks = _format_history_tracks(history_np, anchor)
 
         F = int(future_horizon)
-        prompt = (
-            f"Predict the future 3D point coordinates of {P} points over "
-            f"{F} timestamps, given action: \"{action}\", and history 3d "
-            f"point coordinates: \"{history_tracks}\"."
-        )
+        n_ctrl = getattr(self.config, "bspline_n_ctrl", 0)
+        if n_ctrl:
+            # Match the dataset's B-spline prompt (trajectory_3d_dataset).
+            prompt = (
+                f"Predict the {n_ctrl} B-spline control points of {P} points over "
+                f"a {F}-frame horizon, given action: \"{action}\", and history 3d "
+                f"point coordinates: \"{history_tracks}\"."
+            )
+        else:
+            prompt = (
+                f"Predict the future 3D point coordinates of {P} points over "
+                f"{F} timestamps, given action: \"{action}\", and history 3d "
+                f"point coordinates: \"{history_tracks}\"."
+            )
 
         if self._mm_preprocessor is None or self._data_formatter is None:
             raise RuntimeError(
