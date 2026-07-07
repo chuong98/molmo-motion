@@ -442,6 +442,31 @@ annotated clip in the five datasets contributes to training — there is no
 held-out human-corpus split. Evaluation is run separately on
 [PointMotionBench](#evaluation), which never overlaps with training data.
 
+## B-spline control-point mode (opt-in)
+
+Instead of emitting all `F` future frames as text, the model can emit `D`
+cubic **B-spline control points** per point (`D ∈ {4, 7, 10}`) — a smooth,
+low-dimensional target that cuts the answer to ~70% fewer tokens and is easier
+to learn. Enable it by appending `_ck{D}` to the mixture name; `F` (the `_f{N}`
+token) stays the render horizon. Finetune from a Stage-1 checkpoint (the answer
+semantics change, so re-train rather than expect zero-shot transfer):
+
+```bash
+torchrun --nproc-per-node=8 launch_scripts/sft.py \
+    checkpoints/MolmoMotion-Stage1/step40000 \
+    trajectory_3d_human_p8_h3_f32_ck10 \
+    --save_folder=checkpoints/MolmoMotion-H3-F32-CK10 \
+    --model.mm_preprocessor.video.max_frames=3 \
+    --seq_len=6144 --model.llm.max_sequence_length=6144 \
+    --device_batch_size=2 --max_duration=10000
+```
+
+`bspline_n_ctrl` is recorded in the checkpoint's `config.yaml`, so
+`MolmoMotion.from_pretrained(...)` / `MolmoMotionProcessor` and the evaluators
+transparently render the control points back to `F` frames. For benchmark eval,
+pass `--bspline_n_ctrl 10` to `launch_scripts/eval_pointmotionbench.py`. Design
+and internals: [`docs/bspline_control_points_plan.md`](docs/bspline_control_points_plan.md).
+
 # Evaluation
 
 We evaluate on **PointMotionBench** (HOT3D + WorldTrack + DAVIS) following

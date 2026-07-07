@@ -121,6 +121,10 @@ def main():
                          "paper numbers).")
     ap.add_argument("--fixed_t0", action="store_true",
                     help="Pin t₀ = H − 1 (deterministic across runs).")
+    ap.add_argument("--bspline_n_ctrl", type=int, default=0,
+                    help="If >0 (in {4,7,10}), evaluate a B-spline control-point "
+                         "checkpoint: the answer holds D control points, rendered "
+                         "back to --future frames for metrics (one-shot).")
     args = ap.parse_args()
 
     benches = [b.strip() for b in args.benchmarks.split(",") if b.strip()]
@@ -162,6 +166,8 @@ def main():
                 inner_argv += ["--max_points_per_clip", str(args.max_points_per_clip)]
         if args.fixed_t0:
             inner_argv += ["--fixed_t0", str(args.history - 1)]
+        if args.bspline_n_ctrl > 0:
+            inner_argv += ["--bspline_n_ctrl", str(args.bspline_n_ctrl)]
 
         saved_argv = sys.argv
         try:

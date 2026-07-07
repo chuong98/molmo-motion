@@ -10,6 +10,26 @@ Trains a `trajectory_3d_*` mixture starting from a Molmo2 checkpoint:
 
 See the Training section of the README for the released Stage-1/Stage-2
 recipes and the dataset-name grammar (`molmo_motion/data/get_dataset.py`).
+
+B-spline control-point mode (opt-in; see docs/bspline_control_points_plan.md):
+append `_ck{D}` (D in {4,7,10}) to the mixture name to make the model predict D
+cubic B-spline control points per point instead of F frame rows (~70% fewer
+answer tokens, smoother target). The `_ck{D}` token is mirrored onto the model
+config here so it is saved in config.yaml and the eval/inference decoders render
+the D control points back to the F horizon. Finetune from a Stage-1 checkpoint
+(the numeric semantics of the answer change, so re-train rather than expect
+zero-shot transfer):
+
+    torchrun --nproc-per-node=8 launch_scripts/sft.py \\
+        checkpoints/MolmoMotion-Stage1/step40000 \\
+        trajectory_3d_human_p8_h3_f32_ck10 \\
+        --save_folder=checkpoints/MolmoMotion-H3-F32-CK10 \\
+        --model.mm_preprocessor.video.max_frames=3 \\
+        --seq_len=6144 --model.llm.max_sequence_length=6144 \\
+        --device_batch_size=2 --max_duration=10000
+
+Evaluate with `launch_scripts/eval_pointmotionbench.py` / `full_rollout.py`
+passing `--bspline_n_ctrl 10` (runs one-shot; renders control points to F frames).
 """
 
 import argparse
@@ -143,6 +163,14 @@ def main():
 
     checkpoint = select_checkpoint(args.checkpoint)
     model_cfg = get_model(checkpoint, args.model)
+
+    # B-spline control-point mode: mirror the dataset-name `_ck{D}` token onto
+    # the model config so it is persisted in config.yaml and the eval/public
+    # decode paths know to render D control points back to the F horizon.
+    import re as _re
+    _m_ck = _re.search(r"_ck(\d+)", args.mixture)
+    if _m_ck and hasattr(model_cfg, "bspline_n_ctrl"):
+        model_cfg.bspline_n_ctrl = int(_m_ck.group(1))
 
     if args.debug:
         checkpoint = None

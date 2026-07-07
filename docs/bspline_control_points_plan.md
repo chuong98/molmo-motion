@@ -1,5 +1,9 @@
 # MolmoMotion B-spline Control-Point Trajectory Plan
 
+> **Status: implemented** (branch `feat/bspline-control-points`). Tasks 1–7 done;
+> 14 unit/round-trip/config tests pass. End-to-end train/eval validation is
+> pending real RGB videos (dataset frames not yet on disk).
+
 ## Context
 
 MolmoMotion currently predicts the **full future trajectory** as text: for `F=32`
