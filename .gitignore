@@ -39,3 +39,9 @@ dataset_recipes/*
 
 # examples output mp4s
 *_2d.mp4
+
+# trajectory viz artifacts
+*_3d.npy
+*_3d.png
+*_3d.mp4
+*_2d.mp4
