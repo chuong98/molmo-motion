@@ -70,7 +70,8 @@ def format_tracks(points_delta, visibility, label):
     return f'<tracks coords="{";".join(frame_strings)}">{label}</tracks>'
 
 
-def build_question(style, num_points, H, F, caption, hist_delta, hist_vis):
+def build_question(style, num_points, H, F, caption, hist_delta, hist_vis,
+                   bspline_n_ctrl=0):
     if style == "v1":
         tracks = format_tracks(hist_delta, hist_vis, LABEL_V1)
         return (
@@ -79,6 +80,13 @@ def build_question(style, num_points, H, F, caption, hist_delta, hist_vis):
         )
     elif style == "new":
         tracks = format_tracks(hist_delta, hist_vis, LABEL_HISTORY_NEW)
+        if bspline_n_ctrl > 0:
+            # Matches the dataset's B-spline prompt (trajectory_3d_dataset).
+            return (
+                f"Predict the {bspline_n_ctrl} B-spline control points of {num_points} "
+                f"points over a {F}-frame horizon, "
+                f"given action: \"{caption}\", and history 3d point coordinates: \"{tracks}\"."
+            )
         return (
             f"Predict the future 3D point coordinates of {num_points} points over {F} timestamps, "
             f"given action: \"{caption}\", and history 3d point coordinates: \"{tracks}\"."
@@ -110,6 +118,11 @@ def main():
     p.add_argument("--stride", type=int, default=6)
     p.add_argument("--n_rollouts", type=int, default=3)
     p.add_argument("--prompt_style", choices=["v1", "new"], default="new")
+    p.add_argument("--bspline_n_ctrl", type=int, default=0,
+                   help="If >0 (in {4,7,10}), the checkpoint predicts D B-spline "
+                        "control points instead of F frames. Runs one-shot "
+                        "(n_rollouts=1, stride=F): one answer covers the whole "
+                        "horizon and is rendered back to F frames for metrics.")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--max_new_tokens", type=int, default=None)
     p.add_argument("--device", default="cuda:0")
@@ -165,6 +178,16 @@ def main():
     P = args.num_points
     H = args.history
     F = args.future
+    bspline_n_ctrl = args.bspline_n_ctrl
+    if bspline_n_ctrl > 0:
+        # One-shot: the control-point answer covers the whole F horizon, so
+        # there is no per-frame chunk to feed back. Force a single rollout that
+        # keeps all F predicted frames.
+        if bspline_n_ctrl not in (4, 7, 10):
+            raise ValueError(f"--bspline_n_ctrl must be in {{4,7,10}}; got {bspline_n_ctrl}")
+        args.stride = F
+        args.n_rollouts = 1
+        log.info(f"B-spline mode: n_ctrl={bspline_n_ctrl}, one-shot (stride=F={F}, n_rollouts=1)")
     stride = args.stride
     n_rollouts = args.n_rollouts
     assert stride >= H and stride <= F, f"need H<=stride<=F, got H={H} stride={stride} F={F}"
@@ -178,9 +201,14 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
 
     if args.max_new_tokens is None:
-        max_seq = read_checkpoint_max_seq_len(checkpoint) or 4096
-        args.max_new_tokens = max_seq - INPUT_TOKEN_BUDGET
-        log.info(f"Auto max_new_tokens = {max_seq} - {INPUT_TOKEN_BUDGET} = {args.max_new_tokens}")
+        if bspline_n_ctrl > 0:
+            # D control-point rows of P points: ~ D * (P*4 numbers + index) + wrapper.
+            args.max_new_tokens = bspline_n_ctrl * (P * 4 + 2) + 32
+            log.info(f"Auto max_new_tokens (bspline) = {args.max_new_tokens}")
+        else:
+            max_seq = read_checkpoint_max_seq_len(checkpoint) or 4096
+            args.max_new_tokens = max_seq - INPUT_TOKEN_BUDGET
+            log.info(f"Auto max_new_tokens = {max_seq} - {INPUT_TOKEN_BUDGET} = {args.max_new_tokens}")
 
     # Build dataset — we use its entries list + helper methods but compute
     # configs ourselves (not via ds.eval_configs).
@@ -391,7 +419,12 @@ def main():
     tok = preprocessor.tokenizer
 
     from molmo_motion.data.video_loader import VideoFrames
-    from molmo_motion.eval.egodex_3d_evaluator import parse_tracks_text, tracks_to_array
+    from molmo_motion.eval.egodex_3d_evaluator import (
+        control_points_to_traj,
+        parse_tracks_text,
+        tracks_to_array,
+        tracks_to_control_points,
+    )
 
     # Beaker progress
     beaker_client, beaker_workload, beaker_orig_desc = None, None, ""
@@ -534,7 +567,8 @@ def main():
                     hist_vis_for_prompt = np.ones((P, H), dtype=bool)
 
                     question = build_question(args.prompt_style, P, H, F, caption,
-                                              hist_delta, hist_vis_for_prompt)
+                                              hist_delta, hist_vis_for_prompt,
+                                              bspline_n_ctrl=bspline_n_ctrl)
 
                     video_frames = VideoFrames(
                         frames=frames_rgb,
@@ -571,10 +605,13 @@ def main():
                     parsed = parse_tracks_text(pred_text)
                     if parsed is None:
                         pred_delta = np.zeros((P, F, 3), dtype=np.float32)
-                        pred_vis_full = np.zeros((P, F), dtype=bool)
+                    elif bspline_n_ctrl > 0:
+                        # Parse D control-point rows (index 0..D-1) and render to F frames.
+                        ctrl_delta, _ = tracks_to_control_points(parsed, P, bspline_n_ctrl)
+                        pred_delta = control_points_to_traj(ctrl_delta, F)
                     else:
-                        pred_delta, pred_vis_full = tracks_to_array(parsed, P, F,
-                                                                    start_timestamp=float(H))
+                        pred_delta, _ = tracks_to_array(parsed, P, F,
+                                                        start_timestamp=float(H))
                     pred_raw_full = pred_delta + anchor[None, None, :]  # (P, F, 3)
                     kept = pred_raw_full[:, :stride, :]                 # (P, stride, 3)
                     combined_kept_raw.append(kept)
