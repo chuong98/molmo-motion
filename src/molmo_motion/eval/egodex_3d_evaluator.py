@@ -98,6 +98,30 @@ def tracks_to_array(parsed_tracks, num_points, num_frames, start_timestamp=1.0):
     return delta, visibility
 
 
+def tracks_to_control_points(parsed_tracks, num_points, n_ctrl):
+    """Parse a control-point <tracks> block into (P, D, 3) delta control points.
+
+    Identical parsing to `tracks_to_array`, but the leading number per row is the
+    control-point index 0..D-1 (not a frame timestamp), so start_timestamp=0.
+
+    Returns:
+        ctrl_delta: (P, D, 3) float32 — de-quantized control points (÷1000)
+        valid: (P, D) bool — which control points were present
+    """
+    return tracks_to_array(parsed_tracks, num_points, n_ctrl, start_timestamp=0.0)
+
+
+def control_points_to_traj(ctrl_delta, horizon):
+    """Render (P, D, 3) control points to a (P, F, 3) trajectory (numpy).
+
+    Uses the same cubic B-spline render basis the dataset fit against.
+    """
+    from molmo_motion.data.bspline import render_control_points
+
+    rendered = render_control_points(ctrl_delta, horizon)  # torch (P, F, 3)
+    return rendered.detach().cpu().numpy().astype(np.float32)
+
+
 def compute_3d_metrics_raw(pred_raw, gt_raw, gt_vis):
     """Compute MSE and L2 in raw 3D coordinate space on visible points.
 
@@ -180,8 +204,16 @@ class EgoDex3DEvaluator:
                 n_failed += 1
                 continue
 
-            pred_delta, pred_vis = tracks_to_array(
-                parsed, num_points, num_frames, start_timestamp)
+            # B-spline mode: the answer holds D control-point rows (index
+            # 0..D-1); parse them and render back to the F-frame trajectory in
+            # shared-anchor delta space. Frame mode: parse F frame rows directly.
+            n_ctrl = metadata.get("bspline_n_ctrl")
+            if n_ctrl:
+                ctrl_delta, _ = tracks_to_control_points(parsed, num_points, int(n_ctrl))
+                pred_delta = control_points_to_traj(ctrl_delta, num_frames)
+            else:
+                pred_delta, pred_vis = tracks_to_array(
+                    parsed, num_points, num_frames, start_timestamp)
 
             # Convert predicted delta back to raw 3D space
             pred_raw = pred_delta + gt_anchor

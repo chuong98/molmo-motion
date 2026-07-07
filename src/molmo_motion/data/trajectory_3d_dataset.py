@@ -163,6 +163,10 @@ LABEL_TEXT_HISTORY = "3d object history"
 LABEL_TEXT_FUTURE = "3d object trajectories"
 LABEL_TEXT_ENDPOINT = "3d object endpoints"
 LABEL_TEXT_2D_COORD = "2d object point"
+# B-spline control-point answer mode: the future is emitted as D control-point
+# rows (leading number = control-point index 0..D-1) instead of F frame rows.
+# The distinct label lets the evaluator/decoder pick the render path.
+LABEL_TEXT_CONTROL_POINTS = "3d object control points"
 # v1-era (traj3d_droid_v1) label: a single "object points" string was used for
 # both prompt and answer <tracks> blocks. Preserved for the _v1match flag.
 LABEL_TEXT_V1 = "object points"
@@ -202,7 +206,9 @@ class Trajectory3DDataset(Dataset):
                  use_camera_frame=False, use_depth_token=False,
                  depth_target_size=378,
                  eval_first_h_frames=False,
-                 merge_train_test=False):
+                 merge_train_test=False,
+                 bspline_n_ctrl=0, bspline_reg_lambda=0.0,
+                 bspline_reg_order=1, bspline_ctrl_clip=None):
         self.split = split
         self.num_points = num_points
         self.num_future_frames = num_future_frames
@@ -273,6 +279,19 @@ class Trajectory3DDataset(Dataset):
         # always uses every annotated clip in `split == "train"` mode
         # regardless of this flag, so it has no effect here.
         self.merge_train_test = merge_train_test
+        # B-spline control-point answer mode (opt-in, see
+        # docs/bspline_control_points_plan.md). When `bspline_n_ctrl > 0`, the
+        # future trajectory is emitted as D cubic control points per point
+        # (fit online per example) instead of F frame rows; the reg/clip knobs
+        # tune the least-squares fit. 0 disables (default frame-based format).
+        self.bspline_n_ctrl = int(bspline_n_ctrl)
+        self.bspline_reg_lambda = float(bspline_reg_lambda)
+        self.bspline_reg_order = int(bspline_reg_order)
+        self.bspline_ctrl_clip = bspline_ctrl_clip
+        if self.bspline_n_ctrl > 0 and self.bspline_n_ctrl not in (4, 7, 10):
+            raise ValueError(
+                f"bspline_n_ctrl must be in {{4, 7, 10}} (or 0 to disable); "
+                f"got {self.bspline_n_ctrl}")
         # Per-instance LRU cache of opened zip/h5/hdf5 file handles. Datasets
         # that store depth in archives (egodex/ytvis/hepic zips,
         # xperience hdf5, droid h5) benefit a lot from keeping handles open
@@ -1836,14 +1855,17 @@ class Trajectory3DDataset(Dataset):
     def _quantize(val):
         return int(round(val * 1000))
 
-    def _format_tracks_text(self, timestamps, points_delta, visibility, label):
+    @staticmethod
+    def _format_tracks_text(timestamps, points_delta, visibility, label):
         """Format delta coords into <tracks> text.
 
         Args:
-            timestamps: list of float timestamps
-            points_delta: (P, F, 3) delta values
-            visibility: (P, F) bool
-            label: trailing label text (e.g. "object history" / "object trajectories")
+            timestamps: list of float leading numbers (frame timestamps in the
+                default format; control-point indices 0..D-1 in B-spline mode)
+            points_delta: (P, F, 3) delta values (or (P, D, 3) control points)
+            visibility: (P, F) bool (or (P, D))
+            label: trailing label text (e.g. "3d object trajectories" /
+                "3d object control points")
         """
         P = points_delta.shape[0]
         frame_strings = []
@@ -1965,14 +1987,40 @@ class Trajectory3DDataset(Dataset):
         lbl_hist = LABEL_TEXT_V1 if self.v1_match_format else LABEL_TEXT_HISTORY
         lbl_fut = LABEL_TEXT_V1 if self.v1_match_format else LABEL_TEXT_FUTURE
         input_tracks = self._format_tracks_text(hist_timestamps, hist_delta, hist_vis, lbl_hist)
-        output_tracks = self._format_tracks_text(future_timestamps, future_delta, valid_mask, lbl_fut)
+
+        # ── B-spline control-point answer (opt-in) ──────────────────
+        # Fit D cubic control points to each point's future (in the same
+        # shared-anchor delta space), pinning t=0 to the point's own last-
+        # history position, and emit them as D rows (index = 0..D-1) instead
+        # of F frame rows. History (prompt) stays frame-based. `ctrl_valid_kp`
+        # marks points with >= D valid future frames; others are dropped.
+        ctrl_np = None
+        ctrl_valid_kp = None
+        if self.bspline_n_ctrl > 0:
+            from molmo_motion.data.bspline import fit_control_points
+            anchor_pos = hist_delta[:, H - 1, :]  # (P, 3) each point's t0 (shared-anchor space)
+            ctrl_t, valid_kp_t = fit_control_points(
+                future_delta, valid=valid_mask, n_ctrl=self.bspline_n_ctrl,
+                anchor=anchor_pos, reg_lambda=self.bspline_reg_lambda,
+                reg_order=self.bspline_reg_order, clip=self.bspline_ctrl_clip)
+            ctrl_np = ctrl_t.numpy()                       # (P, D, 3)
+            ctrl_valid_kp = valid_kp_t.numpy()             # (P,)
+            ctrl_vis = np.broadcast_to(
+                ctrl_valid_kp[:, None], (P, self.bspline_n_ctrl))
+            ctrl_indices = [float(i) for i in range(self.bspline_n_ctrl)]
+            output_tracks = self._format_tracks_text(
+                ctrl_indices, ctrl_np, ctrl_vis, LABEL_TEXT_CONTROL_POINTS)
+        else:
+            output_tracks = self._format_tracks_text(
+                future_timestamps, future_delta, valid_mask, lbl_fut)
 
         # Endpoint-first mode: emit a single-frame <tracks>...<LABEL_TEXT_ENDPOINT> block
         # covering only the last valid future frame, prepended to the full trajectory
         # answer. Supervised by the normal answer CE loss (appears first in the answer,
         # so gets gradient before the full trajectory tokens).
         endpoint_tracks = ""
-        if (not self.v1_match_format) and self.pred_end_point_first and n_actual_future > 0:
+        if (not self.v1_match_format) and self.bspline_n_ctrl == 0 \
+                and self.pred_end_point_first and n_actual_future > 0:
             last_idx = n_actual_future - 1
             endpoint_tracks = self._format_tracks_text(
                 [future_timestamps[last_idx]],
@@ -2037,16 +2085,25 @@ class Trajectory3DDataset(Dataset):
                 fields.append(f'history 3d point coordinates: "{input_tracks}"')
             if len(fields) >= 2:
                 fields[-1] = f"and {fields[-1]}"
-            question = (f"Predict the future 3D point coordinates of {P} points over "
-                        f"{n_actual_future} timestamps, " + ", ".join(fields) + ".")
-            if self.pred_end_point_first:
+            if self.bspline_n_ctrl > 0:
+                # B-spline mode: ask for D control points over an F-frame horizon.
+                question = (
+                    f"Predict the {self.bspline_n_ctrl} B-spline control points of "
+                    f"{P} points over a {F}-frame horizon, " + ", ".join(fields) + ".")
+            else:
+                question = (f"Predict the future 3D point coordinates of {P} points over "
+                            f"{n_actual_future} timestamps, " + ", ".join(fields) + ".")
+            if self.bspline_n_ctrl == 0 and self.pred_end_point_first:
                 question += " predict the endpoint 3d coordinate first."
 
             # ── Build answer: optional endpoint → optional history → full trajectory ──
             answer_blocks = []
             if endpoint_tracks:
                 answer_blocks.append(endpoint_tracks)
-            if self.predict_history_3d:
+            # In B-spline mode the answer is the single control-point block only
+            # (history stays frame-based in the prompt; mixing formats in the
+            # answer would confuse the label-keyed decoder).
+            if self.predict_history_3d and self.bspline_n_ctrl == 0:
                 answer_blocks.append(input_tracks)
             answer_blocks.append(output_tracks)
             output_tracks = " ".join(answer_blocks)
@@ -2101,6 +2158,15 @@ class Trajectory3DDataset(Dataset):
             "pass_idx": None,
             "point_indices": chosen_indices.tolist(),
         }
+
+        # B-spline mode: record D and the render horizon F so the decoder knows
+        # how to parse the control-point answer and render it back to F frames.
+        # gt_future_raw / gt_future_vis stay frame-based (F frames) for metrics.
+        if self.bspline_n_ctrl > 0:
+            metadata["bspline_n_ctrl"] = int(self.bspline_n_ctrl)
+            metadata["future_horizon"] = int(F)
+            if ctrl_valid_kp is not None:
+                metadata["bspline_valid_kp"] = ctrl_valid_kp.tolist()
 
         # Pad gt_future_raw if needed (for padded frames, use last actual value)
         if n_actual_future < F:

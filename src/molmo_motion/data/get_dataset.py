@@ -24,6 +24,10 @@ Tokens:
   _p{N}       num_points          (default 8)
   _h{N}       history_size        (default 3)
   _f{N}       num_future_frames   (default 8)
+  _ck{N}      B-spline control points per point (N in {4,7,10}); enables the
+              control-point answer format instead of F frame rows. F (the
+              _f{N} horizon) is still the render horizon. E.g.
+              trajectory_3d_human_p8_h3_f32_ck10.
   _human      shorthand for `egodex,ytvis,hepic,xperience,stereo4d`
               (5 human-video datasets — the public training recipe)
   _test       evaluation mode: load the test slice of the dataset(s).
@@ -60,9 +64,11 @@ def get_dataset_by_name(dataset_name, split) -> Dataset:
     m_p = re.search(r"_p(\d+)", dataset_name)
     m_h = re.search(r"_h(\d+)", dataset_name)
     m_f = re.search(r"_f(\d+)", dataset_name)
+    m_ck = re.search(r"_ck(\d+)", dataset_name)
     num_points = int(m_p.group(1)) if m_p else 8
     history = int(m_h.group(1)) if m_h else 3
     future = int(m_f.group(1)) if m_f else 8
+    bspline_n_ctrl = int(m_ck.group(1)) if m_ck else 0
 
     _split = "test" if "_test" in dataset_name else split
 
@@ -90,6 +96,7 @@ def get_dataset_by_name(dataset_name, split) -> Dataset:
         max_eval_per_dataset=max_eval,
         dataset_weighting="sqrt",
         use_camera_frame=True,
+        bspline_n_ctrl=bspline_n_ctrl,
     )
 
 
