@@ -53,6 +53,7 @@ import argparse
 import json
 from pathlib import Path
 
+import cv2
 import numpy as np
 import torch
 from PIL import Image
@@ -89,6 +90,7 @@ def render_trajectory_mp4(
     dot_size: float = 36.0,
     pad: bool = False,
     pad_margin: float = 0.05,
+    action: str = "",
 ) -> str:
     """Animate a predicted 3D trajectory as a 2D track over the static t_0 frame.
 
@@ -135,6 +137,7 @@ def render_trajectory_mp4(
     anchor_2d = _np(points_2d_at_t0).astype(np.float64)  # (P, 2)
     img = np.asarray(t0_image.convert("RGB"))
     H, W = img.shape[:2]
+
 
     px = project_camera_xyz_to_pixel(pred, K)         # (P, F, 2)
     # Prepend the t_0 query pixel so each trail starts on the tracked point.
@@ -199,7 +202,19 @@ def render_trajectory_mp4(
         fig.canvas.draw()
         buf = np.asarray(fig.canvas.buffer_rgba())[..., :3]
         # Force exact even dimensions so yuv420p / h264 is happy.
-        frame = np.asarray(Image.fromarray(buf).resize((out_w, out_h)))
+        frame = cv2.resize(buf, (out_w, out_h), interpolation=cv2.INTER_LINEAR)
+        frame = np.ascontiguousarray(frame, dtype=np.uint8)
+        caption = "" if action is None else str(action)
+        cv2.putText(
+            frame,
+            caption,
+            (10, 30),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1.0,
+            (255, 255, 255),
+            2,
+            cv2.LINE_AA,
+        )
         frames.append(frame)
         plt.close(fig)
 
@@ -419,8 +434,10 @@ def prediction_from_jsonl(jsonl_path: Path, video: str) -> torch.Tensor:
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--example", default="davis_bmx_trees",
+    ap.add_argument("--example", default="egodex_ball_base",
                     help="Sub-directory of examples/data/ to run on.")
+    ap.add_argument("--action", type=str,
+                    help="Language action description (e.g. 'Pick up the green ball').")
     ap.add_argument("--model", default="checkpoints/MolmoMotion-4B-H3-F30")
     ap.add_argument("--future-horizon", type=int, default=30)
     ap.add_argument("--output", default=None, help="Output MP4 path.")
@@ -457,13 +474,13 @@ def main():
     args.plot_3d = _auto(args.plot_3d, ".png")
     args.plot_3d_mp4 = _auto(args.plot_3d_mp4, ".mp4")
 
-    example_dir = EXAMPLES_DIR / args.example
+
     output = args.output or f"{args.example}_2d.mp4"
 
     # ``start_xyz`` is the (P, 3) camera-frame position at t_0 (last history
     # frame); when available it anchors each 3D track on the tracked point.
     start_xyz = None
-
+    example_dir = EXAMPLES_DIR / args.example
     if args.from_prediction:
         # No model: pull the shipped (P, F, 3) prediction. Same array the live
         # model would hand back as out.future_3d.
@@ -486,10 +503,11 @@ def main():
         H = processor.config.history_size
 
         (meta, history_frames, points_2d_at_t0, points_3d_history,
-         intrinsics, action) = load_example(example_dir, H)
+         intrinsics, _) = load_example(example_dir, H)
         t0_image = history_frames[-1]
         start_xyz = points_3d_history[-1]                # (P, 3) t_0 anchor
-
+        action = args.action
+        print(action)
         inputs = processor(
             history_frames=history_frames,
             points_2d_at_t0=points_2d_at_t0,
@@ -513,6 +531,7 @@ def main():
         points_2d_at_t0=points_2d_at_t0,
         output_path=output,
         pad=args.pad,
+        action=action
     )
     print(f"Wrote {output}")
 

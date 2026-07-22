@@ -1,6 +1,6 @@
 """Visualize a predicted 3D trajectory from MolmoMotion.
 
-Saves a per-history-frame PNG with predicted points overlaid as a coloured
+Savinferes a per-history-frame PNG with predicted points overlaid as a coloured
 polyline per object. Either matplotlib (top-down + side views) or a plain
 2D projection onto the t_0 image if `--mode=overlay`.
 

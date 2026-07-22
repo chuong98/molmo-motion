@@ -44,6 +44,9 @@ dependencies = [
     "opencv-python-headless",
     "scipy",
     "torchcodec",
+    "tensorrt-cu12==10.16.1.11",
+    "imageio-ffmpeg==0.6.0",
+    "matplotlib",
 ]
 
 [project.optional-dependencies]
@@ -72,7 +75,9 @@ molmo-motion-eval = "molmo_motion.cli.eval:main"
 molmo-motion-convert-hf = "molmo_motion.hf_model.convert_molmo_motion_to_hf:main"
 
 [tool.setuptools.packages.find]
-where = ["src"]
+where = ["src", "."]
+include = ["molmo_motion*", "data_generation*"]
+exclude = ["tests*"]
 
 [tool.ruff]
 line-length = 100
